@@ -1,6 +1,7 @@
 const PANEL='rc-panel';
     let currentPanel=null;
     let currentPanelCleanup=null;
+    const chipRegistry = new Map();
     const throttleMs = 400;
     let lastRun = 0;
 
@@ -71,46 +72,113 @@ const PANEL='rc-panel';
       return out;
     }
 
+    function findCardForHash(hash){
+      if (!hash) return null;
+      const entry = chipRegistry.get(hash);
+      if (entry){
+        if (entry.card?.isConnected) return entry.card;
+        if (entry.button?.isConnected){
+          const host = entry.button.closest('[data-rc-hash]');
+          if (host){ entry.card = host; return host; }
+        }
+      }
+      try{
+        return document.querySelector(`[data-rc-hash="${hash}"]`);
+      }catch(_){ return null; }
+    }
+
+    function findReplyButton(root){
+      const buttons = qsaDeep('button, [role="button"]', root);
+      return buttons.find(btn => {
+        if (!btn || btn.classList?.contains('rc-chip-btn')) return false;
+        const text = (btn.textContent||'').toLowerCase();
+        return /odpowiedz|odpowiedź|reply|respond/.test(text);
+      }) || null;
+    }
+
+    function createChipButton(hash){
+      const btn = document.createElement('button');
+      btn.className = 'rc-chip-btn';
+      btn.setAttribute('data-rc-hash', hash);
+      btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 3l1.6 3.7L17 8.2l-3.4 1.5L12 13l-1.6-3.3L7 8.2l3.4-1.5L12 3z" stroke="currentColor" stroke-width="1.6"/></svg>
+          <span>Podpowiedz odpowiedź</span>`;
+      btn.addEventListener('click', (e)=>{
+        const button = e.currentTarget;
+        const targetHash = button.getAttribute('data-rc-hash') || '';
+        const hostCard = button.closest('[data-rc-hash]');
+        const card = (hostCard && hostCard.dataset.rcHash === targetHash) ? hostCard : findCardForHash(targetHash);
+        if (!card){ showToast('Nie mogę znaleźć opinii dla tej podpowiedzi.'); return; }
+        openCardPanel(card, button);
+      });
+      return btn;
+    }
+
+    function placeChip(card, btn){
+      if (!card) return;
+      if (!card.dataset.rcHash) card.dataset.rcHash = btn.getAttribute('data-rc-hash') || '';
+      const duplicates = card.querySelectorAll('.rc-chip-btn');
+      duplicates.forEach(el => { if (el !== btn) el.remove(); });
+      if (btn.parentElement && card.contains(btn)) return;
+      const replyBtn = findReplyButton(card);
+      if (replyBtn && replyBtn.parentElement){
+        replyBtn.insertAdjacentElement('afterend', btn);
+        return;
+      }
+      const replyField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
+      if (replyField && replyField.parentElement){
+        replyField.insertAdjacentElement('beforebegin', btn);
+        return;
+      }
+      card.appendChild(btn);
+    }
+
+    function ensureChipForCard(card, hash){
+      if (!hash) return;
+      let entry = chipRegistry.get(hash);
+      if (entry && (!entry.button || !entry.button.isConnected)){
+        chipRegistry.delete(hash);
+        entry = null;
+      }
+      if (!entry){
+        const button = createChipButton(hash);
+        entry = { button, card };
+        chipRegistry.set(hash, entry);
+      }
+      entry.card = card;
+      placeChip(card, entry.button);
+    }
+
+    function cleanupChipRegistry(activeHashes){
+      chipRegistry.forEach((entry, hash)=>{
+        if (!entry || !entry.button){ chipRegistry.delete(hash); return; }
+        if (!entry.button.isConnected){ chipRegistry.delete(hash); return; }
+        if (!activeHashes.has(hash)){
+          entry.button.remove();
+          chipRegistry.delete(hash);
+        }
+      });
+    }
+
     function scan(){
       injectForCards();
       injectForDialog();
     }
 
-    function findEligibleCards(root=document){
-      const candidates = qsaDeep('[role="article"], [data-review-id], div[aria-label*="review"], div.hxVHQb', root);
-      return candidates.filter(card => {
-        if (card.querySelector('.rc-chip-btn')) return false;
-        const text = (card.innerText||'').trim();
-        if (text.length < 40) return false;
-        const h = (card.getAttribute('data-review-id') || '') + '|' + hash(text.slice(0,300));
-        card.dataset.rcHash = h;
-        const replyField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
-        const replyBtn   = qsaDeep('button, [role="button"]', card).find(b=>/odpowiedz|odpowiedź|reply|respond/i.test((b.textContent||'').toLowerCase()));
-        return Boolean(replyField || replyBtn);
-      });
-    }
-
     function injectForCards(){
-      const cards = findEligibleCards();
-      cards.forEach(card => {
-        const btn = document.createElement('button');
-        btn.className = 'rc-chip-btn';
-        btn.setAttribute('data-rc-hash', card.dataset.rcHash);
-        btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 3l1.6 3.7L17 8.2l-3.4 1.5L12 13l-1.6-3.3L7 8.2l3.4-1.5L12 3z" stroke="currentColor" stroke-width="1.6"/></svg>
-          <span>Podpowiedz odpowiedź</span>`;
-        btn.addEventListener('click', ()=> openCardPanel(card, btn));
-        const replyBtn = qsaDeep('button, [role="button"]', card).find(b=>/odpowiedz|odpowiedź|reply|respond/i.test((b.textContent||'').toLowerCase()));
-        if (replyBtn && replyBtn.parentElement){
-          replyBtn.insertAdjacentElement('afterend', btn);
-          return;
-        }
+      const candidates = qsaDeep('[role="article"], [data-review-id], div[aria-label*="review"], div.hxVHQb');
+      const activeHashes = new Set();
+      candidates.forEach(card => {
+        const text = (card.innerText||'').trim();
+        if (text.length < 40) return;
+        const hashVal = (card.getAttribute('data-review-id') || '') + '|' + hash(text.slice(0,300));
+        card.dataset.rcHash = hashVal;
         const replyField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
-        if (replyField){
-          replyField.insertAdjacentElement('beforebegin', btn);
-          return;
-        }
-        card.appendChild(btn);
+        const replyBtn = findReplyButton(card);
+        if (!(replyField || replyBtn)) return;
+        ensureChipForCard(card, hashVal);
+        activeHashes.add(hashVal);
       });
+      cleanupChipRegistry(activeHashes);
     }
 
     async function openCardPanel(card, anchor){
@@ -240,10 +308,11 @@ const PANEL='rc-panel';
       });
 
       document.getElementById('rc_insert').onclick = async ()=> {
+        const targetHash = panel.parentElement?.dataset.rcTarget || card.dataset.rcHash || '';
         const key = seg.querySelector('.active')?.dataset.style || 'soft';
         const text = state[key] || '';
         if(!text){ document.getElementById('rc_err').textContent='Brak treści do wstawienia.'; return; }
-        await pasteIntoReplyViaPopup(card, text);
+        await pasteIntoReplyViaPopup(targetHash, card, text);
       };
       document.getElementById('rc_regen').onclick = ()=> generateAll(panel, card, state, true);
       document.getElementById('rc_close').onclick = ()=> { closeCurrentPanel(); };
@@ -365,10 +434,15 @@ const PANEL='rc-panel';
       return m ? m[1].replace(',','.') : '';
     }
 
-    async function pasteIntoReplyViaPopup(card, text){
+    async function pasteIntoReplyViaPopup(targetHash, fallbackCard, text){
+      let card = findCardForHash(targetHash);
+      if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
+      if (!card){ showToast('Nie mogę znaleźć opinii. Spróbuj ponownie.'); return; }
+      const inlineField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
+      if (inlineField){ await pasteIntoExistingTextarea(card, text); return; }
       let dialog = qsaDeep('[role="dialog"], [aria-modal="true"]')[0];
       if (!dialog){
-        const replyBtn = qsaDeep('button, [role="button"]', card).find(b=>/odpowiedz|odpowiedź|reply|respond/i.test((b.textContent||'').toLowerCase()));
+        const replyBtn = findReplyButton(card);
         if (replyBtn){
           replyBtn.scrollIntoView({block:'center'});
           ['mouseover','mousedown','mouseup','click'].forEach(ev=> replyBtn.dispatchEvent(new MouseEvent(ev, {bubbles:true, cancelable:true, view:window})));
