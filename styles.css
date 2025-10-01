@@ -33,12 +33,6 @@
     .rc-link{ font-size:12px; color:#2563eb; cursor:pointer; text-decoration:underline }
     .rc-spinner{ width:16px; height:16px; border:2px solid #cbd5e1; border-top-color:var(--rc-accent); border-radius:50%; animation:rcspin .8s linear infinite }
 
-    .rc-toolbar{ position:sticky; top:8px; z-index:2147483647; background:#ffffffcc; backdrop-filter: blur(6px);
-      border:1px solid var(--rc-border); border-radius:12px; padding:8px; display:flex; gap:8px; align-items:center; box-shadow: var(--rc-shadow); animation: rcfade .18s ease both; }
-    .rc-toolbar .rc-seg{ margin-left:4px }
-    .rc-toolbar .rc-mini{ font-size:12px; padding:6px 10px; border-radius:8px }
-    .rc-toolbar .rc-note{ display:none; }
-    @media (min-width: 640px){ .rc-toolbar .rc-note{ display:inline; } }
 
     .rc-toast{ position:fixed; left:50%; bottom:18px; transform:translateX(-50%); background:#111827; color:#fff; padding:10px 14px; border-radius:10px; font:13px system-ui; box-shadow: var(--rc-shadow); z-index:2147483647 }
     

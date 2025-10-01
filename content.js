@@ -231,7 +231,6 @@ const PANEL='rc-panel';
 
     function scan(){
       injectForCards();
-      injectForDialog();
     }
 
     function injectForCards(){
@@ -261,11 +260,16 @@ const PANEL='rc-panel';
 
       const margin = 16;
       let raf = 0;
+      const position = { target: card, anchor: anchor };
+      const scrollListeners = [];
+
       const repositionNow = ()=>{
-        if (!document.body.contains(card)){ closeCurrentPanel(); return; }
-        const rect = card.getBoundingClientRect();
-        if (!rect.width || !rect.height) return;
-        const anchorRect = (anchor && anchor.isConnected && anchor.getBoundingClientRect) ? anchor.getBoundingClientRect() : rect;
+        const ref = (position.target && position.target.isConnected) ? position.target : card;
+        if (!ref || !document.body.contains(ref)){ closeCurrentPanel(); return; }
+        const rect = ref.getBoundingClientRect();
+        if (!rect.width && !rect.height) return;
+        const anchorSource = (position.anchor && position.anchor.isConnected && position.anchor.getBoundingClientRect) ? position.anchor : ref;
+        const anchorRect = anchorSource.getBoundingClientRect ? anchorSource.getBoundingClientRect() : rect;
         const viewportWidth = window.innerWidth;
         const viewportHeight = window.innerHeight;
         const panelRect = panel.getBoundingClientRect();
@@ -280,36 +284,48 @@ const PANEL='rc-panel';
         wrap.style.top = `${Math.round(top)}px`;
         wrap.style.left = `${Math.round(left)}px`;
       };
+
       const scheduleReposition = ()=>{
         if (raf) cancelAnimationFrame(raf);
         raf = requestAnimationFrame(()=>{ raf=0; repositionNow(); });
       };
 
-      const onResize = ()=> scheduleReposition();
-
-      const scrollParents = getScrollParents(card);
-      const scrollListeners = scrollParents.map(node=>{
-        const handler = ()=> scheduleReposition();
-        node.addEventListener('scroll', handler, {passive:true});
-        return { node, handler };
-      });
-
-      window.addEventListener('resize', onResize);
-
-      const ro = window.ResizeObserver ? new ResizeObserver(scheduleReposition) : null;
-      if (ro){
-        try{ ro.observe(card); ro.observe(panel); if(anchor && anchor.isConnected) ro.observe(anchor); }catch(_){ }
-      }
+      const onWindowResize = ()=> scheduleReposition();
+      const ro = window.ResizeObserver ? new ResizeObserver(()=> scheduleReposition()) : null;
       const io = window.IntersectionObserver ? new IntersectionObserver(()=> scheduleReposition(), {threshold:[0,0.5,1]}) : null;
-      if (io){
-        try{ io.observe(card); if(anchor && anchor.isConnected) io.observe(anchor); }catch(_){ }
-      }
+
+      const resetObservers = ()=>{
+        while(scrollListeners.length){
+          const { node, handler } = scrollListeners.pop();
+          try{ node.removeEventListener('scroll', handler); }catch(_){ }
+        }
+        const nodesToTrack = new Set();
+        if (position.target && position.target.isConnected) getScrollParents(position.target).forEach(n=> nodesToTrack.add(n));
+        if (position.anchor && position.anchor.isConnected) getScrollParents(position.anchor).forEach(n=> nodesToTrack.add(n));
+        if (!nodesToTrack.size) nodesToTrack.add(window);
+        nodesToTrack.forEach(node=>{
+          if (!node) return;
+          const handler = ()=> scheduleReposition();
+          try{ node.addEventListener('scroll', handler, {passive:true}); }
+          catch(_){ try{ node.addEventListener('scroll', handler); }catch(__){} }
+          scrollListeners.push({ node, handler });
+        });
+        if (ro){
+          ro.disconnect();
+          [position.target, position.anchor, panel].forEach(el=>{ if (el && el.isConnected){ try{ ro.observe(el); }catch(_){ } } });
+        }
+        if (io){
+          io.disconnect();
+          [position.target, position.anchor].forEach(el=>{ if (el && el.isConnected){ try{ io.observe(el); }catch(_){ } } });
+        }
+      };
 
       const cleanup = ()=>{
-        scrollListeners.forEach(({node, handler})=>{
+        while(scrollListeners.length){
+          const { node, handler } = scrollListeners.pop();
           try{ node.removeEventListener('scroll', handler); }catch(_){ }
-        });
-        window.removeEventListener('resize', onResize);
+        }
+        window.removeEventListener('resize', onWindowResize);
         if (raf) cancelAnimationFrame(raf);
         raf = 0;
         if (ro) ro.disconnect();
@@ -319,8 +335,20 @@ const PANEL='rc-panel';
         if (wrap.parentElement) wrap.parentElement.removeChild(wrap);
       };
       currentPanelCleanup = cleanup;
-      wrap.reposition = scheduleReposition;
 
+      wrap.reposition = scheduleReposition;
+      wrap.updatePositionTargets = (target, anchorEl)=>{
+        if (target && target.isConnected) position.target = target;
+        if (anchorEl && anchorEl.isConnected) position.anchor = anchorEl;
+        const isDialog = position.target && (position.target.getAttribute?.('role') === 'dialog' || position.target.getAttribute?.('aria-modal') === 'true');
+        if (isDialog){ wrap.dataset.rcMode = 'dialog'; }
+        else { delete wrap.dataset.rcMode; }
+        resetObservers();
+        scheduleReposition();
+      };
+
+      window.addEventListener('resize', onWindowResize);
+      resetObservers();
       repositionNow();
 
       const { apiKey } = await chrome.storage.sync.get(['apiKey']);
@@ -329,7 +357,7 @@ const PANEL='rc-panel';
       renderMainPanel(panel, card);
     }
 
-    function renderKeyForm(panel, card){
+function renderKeyForm(panel, card){
       if (!panel.parentElement || !panel.parentElement.isConnected) return;
       panel.innerHTML = `
         <div class="rc-head"><div class="rc-title"><span class="rc-dot"></span> Klucz Gemini</div></div>
@@ -391,79 +419,6 @@ const PANEL='rc-panel';
       panel.parentElement?.reposition?.();
     }
 
-    function injectForDialog(){
-      const dialogs = qsaDeep('[role="dialog"], [aria-modal="true"]');
-      dialogs.forEach(dialog => {
-        if (dialog.querySelector('.rc-toolbar')) return;
-        const textarea = qsaDeep('textarea, [contenteditable="true"]', dialog)[0];
-        if (!textarea) return;
-
-        const tb = document.createElement('div');
-        tb.className = 'rc-toolbar';
-        tb.innerHTML = `
-          <strong>AI</strong>
-          <div class="rc-seg" id="rc_seg_tb">
-            <button data-style="soft" class="active">Delikatna</button>
-            <button data-style="brief">Rzeczowa</button>
-            <button data-style="proactive">Proaktywna</button>
-          </div>
-          <button id="rc_gen_tb" class="rc-secondary rc-mini">Generuj</button>
-          <button id="rc_apply_tb" class="rc-primary rc-mini" disabled>Wstaw</button>
-          <span class="rc-note">Nie publikuje automatycznie</span>
-          <span id="rc_err_tb" class="rc-error" style="margin-left:6px"></span>
-        `;
-        dialog.insertBefore(tb, dialog.firstChild);
-
-        const state = { soft:'', brief:'', proactive:'' };
-        const seg = tb.querySelector('#rc_seg_tb');
-
-        const updateApply = ()=>{
-          const key = seg.querySelector('.active')?.dataset.style || 'soft';
-          tb.querySelector('#rc_apply_tb').disabled = !(state[key] && state[key].trim().length);
-        }
-
-        seg.addEventListener('click', (e)=>{
-          const b = e.target.closest('button[data-style]'); if(!b) return;
-          seg.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
-          b.classList.add('active');
-          updateApply();
-        });
-
-        tb.querySelector('#rc_gen_tb').onclick = ()=>{
-          tb.querySelector('#rc_err_tb').textContent='';
-          tb.querySelector('#rc_gen_tb').innerHTML = '<span class="rc-spinner"></span>';
-          const payload = { text: getCurrentReviewContext(), rating: detectRatingNear(dialog) };
-          chrome.runtime.sendMessage({ type:'GENERATE_ALL', payload }, (resp)=>{
-            tb.querySelector('#rc_gen_tb').textContent='Generuj';
-            if(!resp || resp.error){
-              tb.querySelector('#rc_err_tb').textContent = resp?.error || 'Błąd (klucz?)';
-              return;
-            }
-            state.soft = resp.soft||''; state.brief=resp.brief||''; state.proactive=resp.proactive||'';
-            updateApply();
-          });
-        };
-
-        tb.querySelector('#rc_apply_tb').onclick = async ()=>{
-          const key = seg.querySelector('.active')?.dataset.style || 'soft';
-          const text = state[key] || '';
-          if(!text){ tb.querySelector('#rc_err_tb').textContent='Najpierw wygeneruj tekst.'; return; }
-          await pasteIntoExistingTextarea(dialog, text, true);
-        };
-      });
-    }
-
-    function getCurrentReviewContext(){
-      const el = qsaDeep('[data-review-id], [role="article"]')[0];
-      return (el?.innerText||'').trim().slice(0, 2000);
-    }
-    function detectRatingNear(root){
-      const starEl = qsaDeep('[aria-label*="stars"], [aria-label*="gwiaz"]', root)[0] || qsaDeep('[aria-label*="stars"], [aria-label*="gwiaz"]')[0];
-      const label = starEl?.getAttribute('aria-label')||'';
-      const m = label.match(/([0-5](?:[,\.][0-9])?)\s*\/\s*5/);
-      return m ? m[1].replace(',','.') : '';
-    }
-
     function generateAll(panel, card, state, force){
       const preview = panel.querySelector('#rc_preview');
       if (!force && state.soft) {
@@ -509,8 +464,13 @@ const PANEL='rc-panel';
       if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
       if (!card){ showToast('Nie mogę znaleźć opinii. Spróbuj ponownie.'); return; }
 
+      const wrap = currentPanel;
       const inlineField = findWritableField(card);
-      if (inlineField && isElementVisible(inlineField)){ await pasteIntoExistingTextarea(card, text, false); return; }
+      if (inlineField && isElementVisible(inlineField)){
+        wrap?.updatePositionTargets?.(card, inlineField);
+        await pasteIntoExistingTextarea(card, text, false);
+        return;
+      }
 
       const replyBtn = findReplyButton(card);
       if (replyBtn){
@@ -524,11 +484,11 @@ const PANEL='rc-panel';
 
       const target = await waitForCondition(()=>{
         const inline = findWritableField(card);
-        if (inline && isElementVisible(inline)) return { root: card };
+        if (inline && isElementVisible(inline)) return { root: card, anchor: inline };
         const dialogs = qsaDeep('[role="dialog"], [aria-modal="true"]');
         for (const dlg of dialogs){
           const field = findWritableField(dlg);
-          if (field){ return { root: dlg }; }
+          if (field){ return { root: dlg, anchor: field }; }
         }
         return null;
       }, 4200, 150);
@@ -538,6 +498,8 @@ const PANEL='rc-panel';
         return;
       }
 
+      const anchorEl = target.anchor || findWritableField(target.root, true) || target.root;
+      wrap?.updatePositionTargets?.(target.root, anchorEl);
       await pasteIntoExistingTextarea(target.root, text, target.root !== card);
     }
 
@@ -550,8 +512,26 @@ const PANEL='rc-panel';
         if (!ok) return;
       }
       if(input.tagName==='TEXTAREA'){ input.value = text; }
-      else { input.innerHTML = text.replace(/\n/g,'<br>'); }
-      input.dispatchEvent(new Event('input',{bubbles:true}));
+      else { input.innerHTML = text.replace(/(?:\r?\n)/g,'<br>'); }
+      let inputEventDispatched = false;
+      try{
+        const evt = new InputEvent('input',{bubbles:true, cancelable:true, data:text, inputType:'insertText'});
+        input.dispatchEvent(evt);
+        inputEventDispatched = true;
+      }catch(_){ }
+      if (!inputEventDispatched){ input.dispatchEvent(new Event('input',{bubbles:true})); }
+      try{ input.dispatchEvent(new Event('change',{bubbles:true})); }catch(_){ }
       try{ input.focus?.(); }catch(_){ }
+      try{
+        if (input.setSelectionRange){ const pos = input.value.length; input.setSelectionRange(pos, pos); }
+        else if (input.isContentEditable){
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          range.collapse(false);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        }
+      }catch(_){ }
     }
-    
+
