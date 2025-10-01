@@ -4,16 +4,27 @@ const PANEL='rc-panel';
     const chipRegistry = new Map();
     const throttleMs = 400;
     let lastRun = 0;
+    let scanPending = false;
+    let scanTimer = 0;
 
-    const mo = new MutationObserver(()=> {
-      const now = performance.now();
-      if (now - lastRun > throttleMs){
-        lastRun = now;
-        requestAnimationFrame(scan);
-      }
-    });
+    const mo = new MutationObserver(()=> queueScan());
     mo.observe(document, {childList:true, subtree:true});
-    scan();
+    if (!window.__rcScrollHandler){
+      window.__rcScrollHandler = ()=> queueScan();
+      window.addEventListener('scroll', window.__rcScrollHandler, {passive:true});
+    }
+    if (!window.__rcResizeHandler){
+      window.__rcResizeHandler = ()=> queueScan();
+      window.addEventListener('resize', window.__rcResizeHandler);
+    }
+    if (!document.__rcVisibilityHandler){
+      document.__rcVisibilityHandler = ()=>{ if (!document.hidden) queueScan(true); };
+      document.addEventListener('visibilitychange', document.__rcVisibilityHandler);
+    }
+    if (!window.__rcScanInterval){
+      window.__rcScanInterval = setInterval(()=> queueScan(), 2800);
+    }
+    queueScan(true);
 
     function hash(str){ let h=0,i=0; for(;i<str.length;i++) h=(h<<5)-h + str.charCodeAt(i)|0; return String(h); }
     function qsaDeep(sel, root=document){
@@ -72,6 +83,27 @@ const PANEL='rc-panel';
       return out;
     }
 
+    function queueScan(force=false){
+      const now = performance.now();
+      const elapsed = now - lastRun;
+      if (!force && elapsed < throttleMs){
+        if (!scanTimer){
+          scanTimer = setTimeout(()=>{
+            scanTimer = 0;
+            queueScan(true);
+          }, Math.max(120, throttleMs - elapsed));
+        }
+        return;
+      }
+      if (scanPending) return;
+      scanPending = true;
+      requestAnimationFrame(()=>{
+        scanPending = false;
+        lastRun = performance.now();
+        scan();
+      });
+    }
+
     function findCardForHash(hash){
       if (!hash) return null;
       const entry = chipRegistry.get(hash);
@@ -94,6 +126,44 @@ const PANEL='rc-panel';
         const text = (btn.textContent||'').toLowerCase();
         return /odpowiedz|odpowiedź|reply|respond/.test(text);
       }) || null;
+    }
+
+    function isElementVisible(el){
+      if (!el || !el.isConnected) return false;
+      if (el.offsetParent !== null) return true;
+      const rect = el.getBoundingClientRect();
+      if ((rect.width > 0 || rect.height > 0) && rect.top < window.innerHeight && rect.bottom > 0) return true;
+      const style = window.getComputedStyle(el);
+      return !(style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0');
+    }
+
+    function findWritableField(root, allowHidden=false){
+      const candidates = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', root);
+      for (const el of candidates){
+        if (!el) continue;
+        if (el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
+        if (el.tagName === 'INPUT' && (el.type && el.type.toLowerCase() !== 'text')) continue;
+        if (el.tagName === 'TEXTAREA' || el.isContentEditable || el.tagName === 'INPUT'){
+          if (isElementVisible(el)) return el;
+        }
+      }
+      if (!allowHidden) return null;
+      return candidates[0] || null;
+    }
+
+    function waitForCondition(check, timeoutMs=3500, intervalMs=120){
+      return new Promise(resolve => {
+        const start = performance.now();
+        const tick = ()=>{
+          try{
+            const value = check();
+            if (value){ resolve(value); return; }
+          }catch(_){ }
+          if (performance.now() - start >= timeoutMs){ resolve(null); return; }
+          setTimeout(tick, intervalMs);
+        };
+        tick();
+      });
     }
 
     function createChipButton(hash){
@@ -378,7 +448,7 @@ const PANEL='rc-panel';
           const key = seg.querySelector('.active')?.dataset.style || 'soft';
           const text = state[key] || '';
           if(!text){ tb.querySelector('#rc_err_tb').textContent='Najpierw wygeneruj tekst.'; return; }
-          await pasteIntoExistingTextarea(dialog, text);
+          await pasteIntoExistingTextarea(dialog, text, true);
         };
       });
     }
@@ -438,24 +508,41 @@ const PANEL='rc-panel';
       let card = findCardForHash(targetHash);
       if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
       if (!card){ showToast('Nie mogę znaleźć opinii. Spróbuj ponownie.'); return; }
-      const inlineField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
-      if (inlineField){ await pasteIntoExistingTextarea(card, text); return; }
-      let dialog = qsaDeep('[role="dialog"], [aria-modal="true"]')[0];
-      if (!dialog){
-        const replyBtn = findReplyButton(card);
-        if (replyBtn){
-          replyBtn.scrollIntoView({block:'center'});
-          ['mouseover','mousedown','mouseup','click'].forEach(ev=> replyBtn.dispatchEvent(new MouseEvent(ev, {bubbles:true, cancelable:true, view:window})));
-          await new Promise(r=> setTimeout(r, 1800));
-          dialog = qsaDeep('[role="dialog"], [aria-modal="true"]')[0];
-        }
+
+      const inlineField = findWritableField(card);
+      if (inlineField && isElementVisible(inlineField)){ await pasteIntoExistingTextarea(card, text, false); return; }
+
+      const replyBtn = findReplyButton(card);
+      if (replyBtn){
+        try{ replyBtn.scrollIntoView({block:'center', behavior:'smooth'}); }catch(_){ }
+        try{ replyBtn.focus?.(); }catch(_){ }
+        try{ replyBtn.click?.(); }catch(_){ }
+        ['pointerdown','pointerup','mousedown','mouseup','click'].forEach(ev=>{
+          try{ replyBtn.dispatchEvent(new MouseEvent(ev, {bubbles:true, cancelable:true, view:window})); }catch(_){ }
+        });
       }
-      if (dialog){ await pasteIntoExistingTextarea(dialog, text); return; }
-      showToast('Nie mogę otworzyć pola odpowiedzi. Otwórz je ręcznie i użyj paska AI w oknie.');
+
+      const target = await waitForCondition(()=>{
+        const inline = findWritableField(card);
+        if (inline && isElementVisible(inline)) return { root: card };
+        const dialogs = qsaDeep('[role="dialog"], [aria-modal="true"]');
+        for (const dlg of dialogs){
+          const field = findWritableField(dlg);
+          if (field){ return { root: dlg }; }
+        }
+        return null;
+      }, 4200, 150);
+
+      if (!target){
+        showToast('Nie mogę otworzyć pola odpowiedzi. Otwórz je ręcznie i użyj paska AI w oknie.');
+        return;
+      }
+
+      await pasteIntoExistingTextarea(target.root, text, target.root !== card);
     }
 
-    async function pasteIntoExistingTextarea(root, text){
-      const input = qsaDeep('textarea, [contenteditable="true"]', root)[0];
+    async function pasteIntoExistingTextarea(root, text, allowHidden=false){
+      const input = findWritableField(root, allowHidden);
       if(!input){ showToast('Nie widzę pola odpowiedzi w oknie.'); return; }
       const current = (input.tagName==='TEXTAREA') ? input.value : input.innerText.trim();
       if (current && current !== text){
@@ -465,5 +552,6 @@ const PANEL='rc-panel';
       if(input.tagName==='TEXTAREA'){ input.value = text; }
       else { input.innerHTML = text.replace(/\n/g,'<br>'); }
       input.dispatchEvent(new Event('input',{bubbles:true}));
+      try{ input.focus?.(); }catch(_){ }
     }
     
