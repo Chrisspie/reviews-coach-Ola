@@ -13,6 +13,7 @@
 
     #rc_root{ position:fixed; inset:0; z-index:2147483647; pointer-events:none; }
     #rc_root .rc-panel-wrap{ pointer-events:auto; position:absolute; }
+    #rc_root .rc-panel-wrap[data-rc-mode="dialog"] .rc-panel{ max-width:420px; width:min(420px, calc(100vw - 32px)); }
 
     .rc-panel{ background:var(--rc-bg); border:1px solid var(--rc-border); border-radius:16px; padding:14px; margin:0;
       box-shadow: var(--rc-shadow); font: 14px/1.45 system-ui; color:var(--rc-text); max-width:760px; min-width:360px; position:relative;

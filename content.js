@@ -26,6 +26,16 @@ const PANEL='rc-panel';
     }
     queueScan(true);
 
+    document.addEventListener('pointerdown', (ev)=>{
+      if (!currentPanel) return;
+      const btn = ev.target.closest('button, [role="button"]');
+      if (!btn) return;
+      if (currentPanel.contains(btn)) return;
+      if (btn.classList && btn.classList.contains('rc-chip-btn')) return;
+      const txt = (btn.textContent||'').toLowerCase();
+      if (/odpowiedz|odpowiedź|reply|respond/.test(txt)){ closeCurrentPanel(); }
+    });
+
     function hash(str){ let h=0,i=0; for(;i<str.length;i++) h=(h<<5)-h + str.charCodeAt(i)|0; return String(h); }
     function qsaDeep(sel, root=document){
       const result=[];
@@ -273,14 +283,27 @@ const PANEL='rc-panel';
         const viewportWidth = window.innerWidth;
         const viewportHeight = window.innerHeight;
         const panelRect = panel.getBoundingClientRect();
-        let left = anchorRect.right + margin;
-        if (left + panelRect.width + margin > viewportWidth){
-          left = rect.left - panelRect.width - margin;
-          if (left < margin){ left = Math.max(margin, viewportWidth - panelRect.width - margin); }
+        const mode = wrap.dataset.rcMode || 'card';
+        let left;
+        let top;
+        if (mode === 'dialog'){
+          left = anchorRect.left;
+          if (left + panelRect.width + margin > viewportWidth){ left = viewportWidth - panelRect.width - margin; }
+          if (left < margin) left = margin;
+          top = anchorRect.bottom + margin;
+          if (top + panelRect.height + margin > viewportHeight){
+            top = Math.max(margin, anchorRect.top - panelRect.height - margin);
+          }
+        } else {
+          left = anchorRect.right + margin;
+          if (left + panelRect.width + margin > viewportWidth){
+            left = rect.left - panelRect.width - margin;
+            if (left < margin){ left = Math.max(margin, viewportWidth - panelRect.width - margin); }
+          }
+          top = Math.min(rect.top, anchorRect.top);
+          const maxTop = viewportHeight - panelRect.height - margin;
+          top = Math.min(Math.max(margin, top), Math.max(margin, maxTop));
         }
-        let top = Math.min(rect.top, anchorRect.top);
-        const maxTop = viewportHeight - panelRect.height - margin;
-        top = Math.min(Math.max(margin, top), Math.max(margin, maxTop));
         wrap.style.top = `${Math.round(top)}px`;
         wrap.style.left = `${Math.round(left)}px`;
       };
@@ -488,7 +511,9 @@ function renderKeyForm(panel, card){
         const dialogs = qsaDeep('[role="dialog"], [aria-modal="true"]');
         for (const dlg of dialogs){
           const field = findWritableField(dlg);
-          if (field){ return { root: dlg, anchor: field }; }
+          if (field && isElementVisible(field)) return { root: dlg, anchor: field };
+          const fallbackField = findWritableField(dlg, true);
+          if (fallbackField) return { root: dlg, anchor: fallbackField };
         }
         return null;
       }, 4200, 150);
