@@ -1,0 +1,16 @@
+{
+  "name": "reviews-coach-gemini-zero-config",
+  "version": "1.0.0",
+  "description": "",
+  "main": "content.js",
+  "scripts": {
+    "test": "node tests/extraction.test.js && node tests/inject.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "jsdom": "^27.0.0"
+  }
+}
