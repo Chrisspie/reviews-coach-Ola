@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reviews Coach — Ustawienia</title>
+    <style>
+        body{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif; padding:24px; max-width:760px; margin:0 auto; color:#111827; }
+        h1{ font-size:20px; margin-bottom:16px; }
+        label{ display:block; font-weight:600; margin:12px 0 6px; }
+        input[type="text"]{ width:100%; padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; }
+        .row{ display:flex; gap:8px; align-items:center; margin-top:12px; }
+        button{ padding:10px 14px; border:none; border-radius:10px; background:#111827; color:#fff; cursor:pointer; }
+        .muted{ color:#6b7280; font-size:12px; margin-top:6px; }
+        .ok{ color:#065f46; font-weight:600; }
+        .err{ color:#b91c1c; font-weight:600; }
+        .hint{ margin-top:18px; padding:12px; border:1px dashed #e5e7eb; border-radius:10px; background:#fafafa; }
+        a{ color:#2563eb; text-decoration:none; }
+        a:hover{ text-decoration:underline; }
+    </style>
+</head>
+<body>
+<h1>Reviews Coach — Ustawienia</h1>
+<p>Wklej swój <b>Google Gemini API key</b>. Klucz trzymamy w <code>chrome.storage.sync</code>.</p>
+<label for="apiKey">Gemini API key</label>
+<input id="apiKey" type="text" placeholder="sk-..." />
+<div class="row">
+    <button id="save">Zapisz</button>
+    <span id="status" class="muted"></span>
+</div>
+<div class="hint">
+    📌 Klucz wygenerujesz w panelu Google AI (Gemini). Pamiętaj o dostępie do modelu <code>gemini-2.0-flash</code>.
+</div>
+
+<script src="options.js"></script>
+</body>
+</html>

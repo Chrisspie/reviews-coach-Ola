@@ -34,7 +34,11 @@ function loadInjection(dom){
   const injectEnd = contentSource.indexOf('function renderKeyForm');
     const extractTextStart = contentSource.indexOf('function extractText');
   const extractTextEnd = contentSource.indexOf('function extractRating');
-  const snippet = contentSource.slice(prefixStart, injectEnd) + contentSource.slice(extractTextStart, extractTextEnd) + '\nmodule.exports = { injectForCards, chipRegistry, qsaDeep, createChipButton, extractText };';
+  const extractRatingEnd = contentSource.indexOf('async function pasteIntoReplyViaPopup');
+  const snippet = contentSource.slice(prefixStart, injectEnd)
+    + contentSource.slice(extractTextStart, extractTextEnd)
+    + contentSource.slice(extractTextEnd, extractRatingEnd)
+    + '\nmodule.exports = { injectForCards, chipRegistry, qsaDeep, createChipButton, extractText, extractRating };';
   const context = vm.createContext(sandbox);
   new vm.Script(snippet, { filename: 'inject-snippet.js' }).runInContext(context);
   return context.module.exports;

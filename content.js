@@ -296,13 +296,17 @@ function injectForCards(){
   const candidates = qsaDeep('[role="article"], [data-review-id], div[aria-label*="review"], div.hxVHQb');
   const activeHashes = new Set();
   candidates.forEach(card => {
-    const rawText = extractText(card) || '';
-    const text = rawText.replace(/\s+/g, ' ').trim();
-    if (text.length < 16) return;
-    const normalized = text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '');
-    if (/podpowiedzodpowiedz|dodajodpowiedz|edytujodpowiedz|twojaodpowiedz|odpowiedzfirm|odpowiedzispodzielono/.test(normalized)) return;
-    const hashVal = (card.getAttribute('data-review-id') || '') + '|' + hash(text.slice(0, 300));
+    const extracted = extractText(card) || '';
+    const fallback = (card.innerText || card.textContent || '').trim();
+    const rawText = extracted || fallback;
+    const normalizedText = rawText.replace(/\s+/g, ' ').trim();
+    if (normalizedText.length < 16) return;
+    const normalized = normalizedText.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '');
+    const hashVal = (card.getAttribute('data-review-id') || '') + '|' + hash(normalizedText.slice(0, 300));
     card.dataset.rcHash = hashVal;
+    if (rawText) card.dataset.rcReviewText = rawText;
+    const ratingSnapshot = extractRating(card) || card.dataset.rcRating || '';
+    if (ratingSnapshot) card.dataset.rcRating = ratingSnapshot;
     const replyField = qsaDeep('textarea, [contenteditable="true"], input[type="text"]', card)[0];
     const replyBtn = findReplyButton(card);
     if (!(replyField || replyBtn)) return;
@@ -320,7 +324,12 @@ async function openCardPanel(card, anchor){
   wrap.appendChild(panel); root.appendChild(wrap);
   currentPanel = wrap;
 
-  const reviewSource = { text: extractText(card), rating: extractRating(card) };
+  const reviewSource = {
+    text: (card.dataset.rcReviewText || extractText(card) || '').trim(),
+    rating: (card.dataset.rcRating || extractRating(card) || '').toString().trim()
+  };
+  card.dataset.rcReviewText = reviewSource.text;
+  card.dataset.rcRating = reviewSource.rating;
 
   const margin = 16;
   let raf = 0;
@@ -439,6 +448,8 @@ function renderKeyForm(panel, card, reviewSource){
   const source = reviewSource || { text: extractText(card), rating: extractRating(card) };
   const reviewText = (source.text || '').trim();
   const reviewRating = (source.rating || '').toString().trim();
+  card.dataset.rcReviewText = reviewText;
+  card.dataset.rcRating = reviewRating;
   const ratingLabel = reviewRating ? `Ocena: ${reviewRating}/5` : 'Ocena: brak danych';
   const ratingHtml = escapeHtml(ratingLabel);
   const reviewTrimmed = reviewText.length > 320 ? reviewText.slice(0, 320).trim() + '...' : reviewText;
@@ -534,7 +545,7 @@ function generateAll(panel, card, state, force, reviewSource){
   preview.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuję…</span></div>';
   panel.parentElement?.reposition?.();
   const source = reviewSource || { text: extractText(card), rating: extractRating(card) };
-  const payload = { text: source.text || '', rating: source.rating || '' };
+  const payload = { text: reviewText, rating: reviewRating };
   console.log('[RC] payload wysylany do SW:', { ...payload });
   chrome.runtime.sendMessage({ type:'GENERATE_ALL', payload }, (resp)=>{
     if(!resp || resp.error){
