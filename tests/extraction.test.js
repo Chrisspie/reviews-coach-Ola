@@ -4,7 +4,11 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const scriptPaths = [
+  path.join(__dirname, '..', 'content', 'namespace.js'),
+  path.join(__dirname, '..', 'content', 'dom.js'),
+  path.join(__dirname, '..', 'content', 'reviews.js')
+];
 
 function loadExtractors(dom){
   const sandbox = {
@@ -18,22 +22,19 @@ function loadExtractors(dom){
     exports: {}
   };
   sandbox.window.getSelection = dom.window.getSelection.bind(dom.window);
-  const qsaStart = contentSource.indexOf('function qsaDeep');
-  const qsaEnd = contentSource.indexOf('function ensureRoot');
-  const extractTextStart = contentSource.indexOf('function extractText');
-  const extractTextEnd = contentSource.indexOf('function extractRating');
-  const extractRatingStart = contentSource.indexOf('function extractRating');
-  const extractRatingEnd = contentSource.indexOf('async function pasteIntoReplyViaPopup');
-  const code = [
-    contentSource.slice(qsaStart, qsaEnd),
-    contentSource.slice(extractTextStart, extractTextEnd),
-    contentSource.slice(extractRatingStart, extractRatingEnd),
-    'module.exports = { extractText, extractRating, qsaDeep };'
-  ].join('\n');
-  const script = new vm.Script(code, { filename: 'extractors.js' });
+  sandbox.global = sandbox.window;
   const context = vm.createContext(sandbox);
-  script.runInContext(context);
-  return context.module.exports;
+  for (const scriptPath of scriptPaths){
+    const code = fs.readFileSync(scriptPath, 'utf8');
+    const script = new vm.Script(code, { filename: path.basename(scriptPath) });
+    script.runInContext(context);
+  }
+  const { RC } = context.window;
+  return {
+    extractText: RC.reviews.extractText,
+    extractRating: RC.reviews.extractRating,
+    qsaDeep: RC.dom.qsaDeep
+  };
 }
 
 function withDom(html, fn){
@@ -124,10 +125,10 @@ let passed = 0;
 for (const test of tests){
   try {
     test.run();
-    console.log(`? ${test.name}`);
+    console.log(`[ok] ${test.name}`);
     passed++;
   } catch (err){
-    console.error(`? ${test.name}`);
+    console.error(`[fail] ${test.name}`);
     console.error(err);
     process.exitCode = 1;
     break;

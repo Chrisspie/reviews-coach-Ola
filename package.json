@@ -2,7 +2,7 @@
   "name": "reviews-coach-gemini-zero-config",
   "version": "1.0.0",
   "description": "",
-  "main": "content.js",
+  "main": "content/index.js",
   "scripts": {
     "test": "node tests/extraction.test.js && node tests/inject.test.js"
   },

@@ -4,7 +4,13 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const contentSource = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const scriptPaths = [
+  path.join(__dirname, '..', 'content', 'namespace.js'),
+  path.join(__dirname, '..', 'content', 'dom.js'),
+  path.join(__dirname, '..', 'content', 'reviews.js'),
+  path.join(__dirname, '..', 'content', 'chips.js'),
+  path.join(__dirname, '..', 'content', 'scan.js')
+];
 
 function loadInjection(dom){
   const sandbox = {
@@ -21,27 +27,26 @@ function loadInjection(dom){
     setInterval: ()=>0,
     clearInterval: ()=>{},
     performance: dom.window.performance,
-    showToast: ()=>{},
-    openCardPanel: ()=>{},
-    closeCurrentPanel: ()=>{},
-    findCardForHash: ()=>null,
+    confirm: ()=>true,
     chrome: { storage: { sync: { get: async()=>({}), set: async()=>{} } } },
     module: { exports: {} },
-    exports: {},
+    exports: {}
   };
-  const prefixStart = contentSource.indexOf('const chipRegistry');
-  const injectStart = contentSource.indexOf('function findReplyButton');
-  const injectEnd = contentSource.indexOf('function renderKeyForm');
-    const extractTextStart = contentSource.indexOf('function extractText');
-  const extractTextEnd = contentSource.indexOf('function extractRating');
-  const extractRatingEnd = contentSource.indexOf('async function pasteIntoReplyViaPopup');
-  const snippet = contentSource.slice(prefixStart, injectEnd)
-    + contentSource.slice(extractTextStart, extractTextEnd)
-    + contentSource.slice(extractTextEnd, extractRatingEnd)
-    + '\nmodule.exports = { injectForCards, chipRegistry, qsaDeep, createChipButton, extractText, extractRating };';
+  sandbox.window.getSelection = dom.window.getSelection.bind(dom.window);
+  sandbox.global = sandbox.window;
   const context = vm.createContext(sandbox);
-  new vm.Script(snippet, { filename: 'inject-snippet.js' }).runInContext(context);
-  return context.module.exports;
+  for (const scriptPath of scriptPaths){
+    const code = fs.readFileSync(scriptPath, 'utf8');
+    const script = new vm.Script(code, { filename: path.basename(scriptPath) });
+    script.runInContext(context);
+  }
+  const { RC } = context.window;
+  return {
+    injectForCards: RC.scan.injectForCards,
+    chipRegistry: RC.state.chipRegistry,
+    qsaDeep: RC.dom.qsaDeep,
+    createChipButton: RC.chips.createChipButton
+  };
 }
 
 function buildCard(dom, text, includeReplyButton = true, attrs = {}){
@@ -68,7 +73,6 @@ function resetEnvironment(dom, helpers){
 }
 
 function runInject(dom, helpers){
-  // simulate MutationObserver scan call
   helpers.injectForCards();
 }
 
@@ -92,5 +96,4 @@ function runInject(dom, helpers){
   assert.strictEqual(chip, null, 'expected no chip for extremely short review');
 })();
 
-console.log('? injectForCards attaches chip for eligible cards');
-
+console.log('[ok] injectForCards attaches chip for eligible cards');
