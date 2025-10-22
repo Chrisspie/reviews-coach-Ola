@@ -33,19 +33,46 @@
     const activeHashes = new Set();
 
     cards.forEach(card => {
-      const extracted = reviews.extractText(card) || '';
+      const extracted = (reviews.extractText(card) || '').trim();
+      const stored = (card.dataset.rcReviewText || '').trim();
       const fallback = (card.innerText || card.textContent || '').trim();
-      const rawText = extracted || fallback;
+      const rawText = extracted || stored || fallback;
+
+      if (extracted){
+        card.dataset.rcReviewText = extracted;
+      } else if (!stored && fallback){
+        card.dataset.rcReviewText = fallback;
+      }
+
+      const extractedRating = (reviews.extractRating(card) || '').toString().trim();
+      const storedRating = (card.dataset.rcRating || '').toString().trim();
+      const ratingSnapshot = extractedRating || storedRating;
+
       const normalizedText = rawText.replace(/\s+/g, ' ').trim();
-      if (normalizedText.length < config.minReviewLength) return;
-      const hashVal = (card.getAttribute('data-review-id') || '') + '|' + dom.hash(normalizedText.slice(0, 300));
+      const normalizedForHash = normalizedText.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+      const sanitizedForHash = reviews.stripBlockedNormalizedText(normalizedForHash);
+      const hashBasis = sanitizedForHash || normalizedForHash;
+      if (hashBasis.length < config.minReviewLength) return;
+
+      const reviewIdAttr = card.getAttribute('data-review-id') || card.getAttribute('data-reviewid') || '';
+      const hashSource = reviewIdAttr ? '' : hashBasis.slice(0, 300);
+      const hashVal = reviewIdAttr ? 'id:' + reviewIdAttr : 'text:' + dom.hash(hashSource);
+      const prevHash = card.dataset.rcHash || '';
+      if (prevHash && prevHash !== hashVal){
+        delete card.dataset.rcReplyEligible;
+      }
       card.dataset.rcHash = hashVal;
-      if (rawText) card.dataset.rcReviewText = rawText;
-      const ratingSnapshot = reviews.extractRating(card) || card.dataset.rcRating || '';
+
       if (ratingSnapshot) card.dataset.rcRating = ratingSnapshot;
+
       const replyField = dom.qsaDeep(config.selectors.textInputs, card)[0];
       const replyBtn = dom.findReplyButton(card);
-      if (!(replyField || replyBtn)) return;
+      const hasReplyUi = Boolean(replyField || replyBtn);
+      if (hasReplyUi){
+        card.dataset.rcReplyEligible = '1';
+      }
+      if (!hasReplyUi && card.dataset.rcReplyEligible !== '1') return;
+
       chips.ensureChipForCard(card, hashVal);
       activeHashes.add(hashVal);
     });

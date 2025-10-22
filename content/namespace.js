@@ -39,11 +39,19 @@
     '.review-snippet'
   ];
   config.blockedNormalizedText = config.blockedNormalizedText || [
+    'podpowiedz odpowiedz',
     'podpowiedz odpowied',
+    'dodaj odpowiedz',
     'dodaj odpowied',
+    'edytuj odpowiedz',
     'edytuj odpowied',
+    'napisz odpowiedz',
     'napisz odpowied',
     'odpowiedz opublikowana',
+    'polubione przez wlasciciela',
+    'liked by owner',
+    'liked by the owner',
+    'liked by business owner',
     'zglos recenz'
   ];
   config.ratingAriaSelectors = config.ratingAriaSelectors || [

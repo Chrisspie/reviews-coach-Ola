@@ -137,6 +137,42 @@
     }) || null;
   };
 
+  dom.findReviewerHeader = function findReviewerHeader(root){
+    if (!root) return null;
+    const selectors = [
+      '[itemprop="author"]',
+      '[itemprop="name"]',
+      '[data-reviewer-name]',
+      '[data-reviewerid]',
+      '[data-review-owner]',
+      '[aria-label*="Local Guide"]',
+      '[aria-label*="owner"]',
+      'a[href*="/maps/contrib"]',
+      'a[href*="/user/"]',
+      'a[href*="/profile"]',
+      '[class*="author"]',
+      '[class*="profile"]',
+      '[class*="header"]',
+      '[class*="title"]',
+      '[role="heading"]',
+      'header'
+    ];
+    for (const selector of selectors){
+      const nodes = dom.qsaDeep(selector, root);
+      for (const node of nodes){
+        if (!node || node === root) continue;
+        if (node.closest('.rc-chip-btn')) continue;
+        if (node.closest('#rc_root')) continue;
+        return node;
+      }
+    }
+    for (let child = root.firstElementChild; child; child = child.nextElementSibling){
+      if (!child || child.classList?.contains('rc-chip-btn')) continue;
+      return child;
+    }
+    return null;
+  };
+
   dom.isElementVisible = function isElementVisible(el){
     if (!el || !el.isConnected) return false;
     if (el.offsetParent !== null) return true;
