@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Reviews Coach - Google Reviews Reply Helper",
+  "name": "Reviews Coach — Google Reviews Reply Helper",
   "version": "1.2.1",
   "description": "Robustly extracts Google review text + rating and generates reply variants via Gemini. Includes debug logs.",
   "permissions": ["activeTab", "scripting", "storage"],
