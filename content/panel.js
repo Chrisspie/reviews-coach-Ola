@@ -126,6 +126,7 @@
       raf = 0;
       resizeObserver?.disconnect?.();
       intersectionObserver?.disconnect?.();
+      state.fieldResetTracker?.stop?.('cleanup');
       if (state.currentPanel === wrap) state.currentPanel = null;
       state.currentPanelCleanup = null;
       if (wrap.parentElement) wrap.parentElement.removeChild(wrap);
@@ -307,6 +308,64 @@
     });
   };
 
+  function describeField(field){
+    if (!field) return null;
+    return {
+      tag: field.tagName,
+      type: field.type || '',
+      isContentEditable: !!field.isContentEditable,
+      valueLength: readFieldValue(field).length
+    };
+  }
+
+  function readFieldValue(input){
+    if (!input) return '';
+    if (input.tagName === 'TEXTAREA') return input.value;
+    if (input.tagName === 'INPUT' && typeof input.value === 'string') return input.value;
+    if (input.isContentEditable) return input.innerText || '';
+    if (typeof input.value === 'string') return input.value;
+    return input.textContent || '';
+  }
+
+  function writeFieldValue(input, text){
+    if (!input) return false;
+    if (input.tagName === 'TEXTAREA' || (input.tagName === 'INPUT' && typeof input.value === 'string')){
+      input.value = text;
+    } else if (input.isContentEditable){
+      input.innerHTML = dom.escapeAndNl2br(text);
+    } else {
+      input.textContent = text;
+    }
+    let inputEventDispatched = false;
+    try {
+      const evt = new InputEvent('input', { bubbles: true, cancelable: true, data: text, inputType: 'insertText' });
+      input.dispatchEvent(evt);
+      inputEventDispatched = true;
+    } catch (_){ }
+    if (!inputEventDispatched){
+      try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_){ }
+    }
+    try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (_){ }
+    return true;
+  }
+
+  function focusField(input){
+    try { input.focus?.(); } catch (_){ }
+    try {
+      if (input.setSelectionRange){
+        const pos = input.value.length;
+        input.setSelectionRange(pos, pos);
+      } else if (input.isContentEditable){
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        range.collapse(false);
+        const selection = window.getSelection();
+        selection?.removeAllRanges?.();
+        selection?.addRange(range);
+      }
+    } catch (_){ }
+  }
+
   panelApi.pasteIntoReply = async function pasteIntoReply(targetHash, fallbackCard, text){
     let card = chips.findCardForHash(targetHash);
     if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
@@ -362,39 +421,127 @@
       dom.showToast('Nie widze pola odpowiedzi w oknie.');
       return;
     }
-    const currentValue = (input.tagName === 'TEXTAREA') ? input.value : input.innerText.trim();
+    const rawCurrentValue = readFieldValue(input);
+    const currentValue = (input.tagName === 'TEXTAREA' || (input.tagName === 'INPUT' && typeof input.value === 'string'))
+      ? rawCurrentValue
+      : rawCurrentValue.trim();
     if (currentValue && currentValue !== text){
       const ok = confirm('W oknie jest juz wpisana tresc. Czy zastapic ja wygenerowana?');
       if (!ok) return;
     }
-    if (input.tagName === 'TEXTAREA'){
-      input.value = text;
-    } else {
-      input.innerHTML = dom.escapeAndNl2br(text);
+    writeFieldValue(input, text);
+    focusField(input);
+    panelApi.observeFieldForReset(root, text, { allowHidden });
+  };
+
+  panelApi.observeFieldForReset = function observeFieldForReset(root, text, options={}){
+    if (!root || !text) return;
+    const allowHidden = !!options.allowHidden;
+    const timeoutMs = Math.max(2000, options.timeoutMs || 16000);
+
+    state.fieldResetTracker?.stop?.('replaced');
+
+    const tracker = { stop: ()=>{} };
+    state.fieldResetTracker = tracker;
+
+    console.log('[RC][panel] observeFieldForReset start', {
+      root: root?.tagName || root?.nodeName || 'UNKNOWN',
+      textLength: text.length,
+      preview: text.slice(0, 80)
+    });
+
+    let field = dom.findWritableField(root, allowHidden);
+    if (!field){
+      console.log('[RC][panel] observeFieldForReset stop (no field)');
+      state.fieldResetTracker = null;
+      return;
     }
-    let inputEventDispatched = false;
-    try {
-      const evt = new InputEvent('input', { bubbles: true, cancelable: true, data: text, inputType: 'insertText' });
-      input.dispatchEvent(evt);
-      inputEventDispatched = true;
-    } catch (_){ }
-    if (!inputEventDispatched){
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (_){ }
-    try { input.focus?.(); } catch (_){ }
-    try {
-      if (input.setSelectionRange){
-        const pos = input.value.length;
-        input.setSelectionRange(pos, pos);
-      } else if (input.isContentEditable){
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        range.collapse(false);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();        selection?.addRange(range);
+
+    console.log('[RC][panel] observeFieldForReset tracking new field', describeField(field));
+
+    let attempts = 0;
+    let stableTicks = 0;
+    let stopped = false;
+
+    const stop = (reason)=>{
+      if (stopped) return;
+      stopped = true;
+      if (poller) clearInterval(poller);
+      if (timeoutId) clearTimeout(timeoutId);
+      try { observer?.disconnect?.(); } catch (_){ }
+      console.log('[RC][panel] observeFieldForReset stop', { reason, attempts });
+      if (state.fieldResetTracker === tracker) state.fieldResetTracker = null;
+    };
+
+    tracker.stop = stop;
+
+    const ensureField = ()=>{
+      if (field && field.isConnected) return field;
+      const next = dom.findWritableField(root, allowHidden);
+      if (next){
+        field = next;
+        console.log('[RC][panel] observeFieldForReset tracking new field', describeField(field));
       }
+      return field;
+    };
+
+    const restoreValue = (reason)=>{
+      const target = ensureField();
+      if (!target) return;
+      attempts++;
+      console.log('[RC][panel] observeFieldForReset restoring value', { reason, attempts });
+      writeFieldValue(target, text);
+    };
+
+    const poller = setInterval(()=>{
+      const target = ensureField();
+      if (!target){
+        stop('field-missing');
+        return;
+      }
+      const value = readFieldValue(target);
+      if (value === text){
+        stableTicks++;
+        if (stableTicks >= 5) stop('stable');
+        return;
+      }
+      if (!value || !value.trim()){
+        if (attempts >= 3){
+          stop('max-attempts');
+          return;
+        }
+        stableTicks = 0;
+        restoreValue('empty');
+        return;
+      }
+      stop('changed-by-user');
+    }, 180);
+
+    const observer = new MutationObserver(()=>{
+      const value = readFieldValue(field);
+      if (value === text) return;
+      if (!value || !value.trim()){
+        if (attempts < 3){
+          stableTicks = 0;
+          restoreValue('mutation');
+        } else {
+          stop('max-attempts');
+        }
+      }
+    });
+
+    try {
+      observer.observe(field, { childList: true, characterData: true, subtree: true, attributes: true });
     } catch (_){ }
+
+    const timeoutId = setTimeout(()=> stop('expired'), timeoutMs);
+
+    console.log('[RC][panel] observeFieldForReset armed', {
+      observer: !!observer,
+      poller: true,
+      timeoutMs
+    });
   };
 })(window);
+
 

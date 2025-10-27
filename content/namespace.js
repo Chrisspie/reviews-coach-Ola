@@ -5,6 +5,7 @@
   if (typeof state.panelId === 'undefined') state.panelId = 'rc-panel';
   if (typeof state.currentPanel === 'undefined') state.currentPanel = null;
   if (typeof state.currentPanelCleanup === 'undefined') state.currentPanelCleanup = null;
+  if (typeof state.fieldResetTracker === 'undefined') state.fieldResetTracker = null;
   if (!state.chipRegistry) state.chipRegistry = new Map();
   if (typeof state.throttleMs === 'undefined') state.throttleMs = 400;
   if (typeof state.lastScanRun === 'undefined') state.lastScanRun = 0;
