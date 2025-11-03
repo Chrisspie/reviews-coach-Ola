@@ -229,10 +229,10 @@
       </div>
       <div class="rc-preview" id="rc_preview"><div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuje...</span></div></div>
       <div class="rc-actions">
-        <button id="rc_insert" class="rc-primary">Wstaw wybrana</button>
+        <button id="rc_copy" class="rc-primary">Skopiuj wygenerowana odpowiedz</button>
         <button id="rc_regen" class="rc-secondary">Regeneruj</button>
         <button id="rc_close" class="rc-secondary">Zamknij</button>
-        <span class="rc-note">Tylko wkleja do pola - <b>nie publikuje automatycznie</b>.</span>
+        <span class="rc-note">Kopiuje do schowka i otwiera okno odpowiedzi.</span>
       </div>
       <div id="rc_err" class="rc-error"></div>
     `;
@@ -246,15 +246,22 @@
       panelEl.querySelector('#rc_preview').textContent = variants[button.dataset.style] || '...';
     });
 
-    panelEl.querySelector('#rc_insert').onclick = async ()=>{
+    panelEl.querySelector('#rc_copy').onclick = async ()=>{
       const targetHash = panelEl.parentElement?.dataset.rcTarget || card.dataset.rcHash || '';
       const activeStyle = seg.querySelector('.active')?.dataset.style || 'soft';
       const textValue = variants[activeStyle] || '';
       if (!textValue){
-        panelEl.querySelector('#rc_err').textContent = 'Brak tresci do wstawienia.';
+        panelEl.querySelector('#rc_err').textContent = 'Brak tresci do skopiowania.';
         return;
       }
-      await panelApi.pasteIntoReply(targetHash, card, textValue);
+      panelEl.querySelector('#rc_err').textContent = '';
+      const copied = await panelApi.copyToClipboard(textValue);
+      if (!copied){
+        panelEl.querySelector('#rc_err').textContent = 'Nie udalo sie skopiowac tresci.';
+        return;
+      }
+      dom.showToast('Skopiowano do schowka.');
+      await panelApi.openReplyPopup(targetHash, card);
     };
 
     panelEl.querySelector('#rc_regen').onclick = ()=>{
@@ -307,7 +314,31 @@
     });
   };
 
-  panelApi.pasteIntoReply = async function pasteIntoReply(targetHash, fallbackCard, text){
+  panelApi.copyToClipboard = async function copyToClipboard(text){
+    if (!text) return false;
+    try {
+      if (navigator.clipboard?.writeText){
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_){ }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_){ ok = false; }
+    textarea.remove();
+    return ok;
+  };
+
+  panelApi.openReplyPopup = async function openReplyPopup(targetHash, fallbackCard){
     let card = chips.findCardForHash(targetHash);
     if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
     if (!card){
@@ -319,7 +350,7 @@
     const inlineField = dom.findWritableField(card);
     if (inlineField && dom.isElementVisible(inlineField)){
       wrap?.updatePositionTargets?.(card, inlineField);
-      await panelApi.fillReplyField(card, text, false);
+      panelApi.focusReplyField(inlineField);
       return;
     }
 
@@ -347,44 +378,30 @@
     }, 4200, 150);
 
     if (!target){
-      dom.showToast('Nie moge otworzyc pola odpowiedzi. Otworz je recznie i uzyj paska AI w oknie.');
+      dom.showToast('Nie moge otworzyc pola odpowiedzi. Otworz je recznie i wklej odpowiedz.');
       return;
     }
 
     const anchorEl = target.anchor || dom.findWritableField(target.root, true) || target.root;
     wrap?.updatePositionTargets?.(target.root, anchorEl);
-    await panelApi.fillReplyField(target.root, text, target.root !== card);
+    panelApi.focusReplyField(target.root, target.root !== card);
   };
 
-  panelApi.fillReplyField = async function fillReplyField(root, text, allowHidden=false){
-    const input = dom.findWritableField(root, allowHidden);
+  panelApi.focusReplyField = function focusReplyField(target, allowHidden=false){
+    let input = null;
+    if (target && target.nodeType === 1 && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)){
+      input = target;
+    } else {
+      input = dom.findWritableField(target, allowHidden);
+    }
     if (!input){
       dom.showToast('Nie widze pola odpowiedzi w oknie.');
       return;
     }
-    const currentValue = (input.tagName === 'TEXTAREA') ? input.value : input.innerText.trim();
-    if (currentValue && currentValue !== text){
-      const ok = confirm('W oknie jest juz wpisana tresc. Czy zastapic ja wygenerowana?');
-      if (!ok) return;
-    }
-    if (input.tagName === 'TEXTAREA'){
-      input.value = text;
-    } else {
-      input.innerHTML = dom.escapeAndNl2br(text);
-    }
-    let inputEventDispatched = false;
-    try {
-      const evt = new InputEvent('input', { bubbles: true, cancelable: true, data: text, inputType: 'insertText' });
-      input.dispatchEvent(evt);
-      inputEventDispatched = true;
-    } catch (_){ }
-    if (!inputEventDispatched){
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (_){ }
     try { input.focus?.(); } catch (_){ }
+    try { input.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_){ }
     try {
-      if (input.setSelectionRange){
+      if (input.tagName === 'TEXTAREA' && input.setSelectionRange){
         const pos = input.value.length;
         input.setSelectionRange(pos, pos);
       } else if (input.isContentEditable){
@@ -392,7 +409,8 @@
         range.selectNodeContents(input);
         range.collapse(false);
         const selection = window.getSelection();
-        selection?.removeAllRanges();        selection?.addRange(range);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
       }
     } catch (_){ }
   };
