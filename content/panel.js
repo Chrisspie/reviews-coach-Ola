@@ -206,12 +206,6 @@
     const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
     const reviewText = (source.text || '').trim();
     const reviewRating = (source.rating || '').toString().trim();
-    const ratingLabel = reviewRating ? `Ocena: ${reviewRating}/5` : 'Ocena: brak danych';
-    const ratingHtml = dom.escapeHtml(ratingLabel);
-    const reviewTrimmed = reviewText.length > 320 ? reviewText.slice(0, 320).trim() + '...' : reviewText;
-    const reviewHtml = reviewTrimmed
-      ? dom.escapeAndNl2br(reviewTrimmed)
-      : '<span class="rc-context-empty">Brak tresci opinii.</span>';
     const variants = { soft: '', brief: '', proactive: '' };
 
     panelEl.innerHTML = `
@@ -222,10 +216,6 @@
           <button data-style="brief">Rzeczowa</button>
           <button data-style="proactive">Proaktywna</button>
         </div>
-      </div>
-      <div class="rc-context" style="margin:12px 0 16px;padding:12px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;">
-        <div class="rc-context-rating" style="font-size:13px;font-weight:600;color:#111827;">${ratingHtml}</div>
-        <div class="rc-context-review" style="margin-top:6px;font-size:13px;line-height:1.45;color:#374151;">${reviewHtml}</div>
       </div>
       <div class="rc-preview" id="rc_preview"><div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuje...</span></div></div>
       <div class="rc-actions">
