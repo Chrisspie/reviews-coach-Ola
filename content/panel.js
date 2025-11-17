@@ -148,58 +148,15 @@
     repositionNow();
 
     try {
-      const { apiKey } = await chrome.storage.sync.get(['apiKey']);
       if (!wrap.isConnected || state.currentPanel !== wrap) return;
-      if (!apiKey){
-        renderKeyForm(panelEl, card, reviewSource);
-      } else {
-        renderMainPanel(panelEl, card, reviewSource);
-      }
+      renderMainPanel(panelEl, card, reviewSource);
     } catch (err){
-      console.error('[RC] Nie udalo sie pobrac konfiguracji', err);
+      console.error('[RC] Nie udalo sie otworzyc panelu', err);
       if (wrap.isConnected){
-        panelEl.innerHTML = '<div class="rc-error">Nie udalo sie wczytac konfiguracji.</div>';
+        panelEl.innerHTML = '<div class="rc-error">Nie udalo sie otworzyc panelu.</div>';
       }
     }
   };
-
-  function renderKeyForm(panelEl, card, reviewSource){
-    if (!panelEl.parentElement || !panelEl.parentElement.isConnected) return;
-    const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
-    const reviewText = (source.text || '').trim();
-    const reviewRating = (source.rating || '').toString().trim();
-    card.dataset.rcReviewText = reviewText;
-    card.dataset.rcRating = reviewRating;
-    const ratingLabel = reviewRating ? `Ocena: ${reviewRating}/5` : 'Ocena: brak danych';
-    const ratingHtml = dom.escapeHtml(ratingLabel);
-    const reviewTrimmed = reviewText.length > 320 ? reviewText.slice(0, 320).trim() + '...' : reviewText;
-    const reviewHtml = reviewTrimmed
-      ? dom.escapeAndNl2br(reviewTrimmed)
-      : '<span class="rc-context-empty">Brak tresci opinii.</span>';
-
-    panelEl.innerHTML = `
-      <div class="rc-head"><div class="rc-title"><span class="rc-dot"></span> Klucz Gemini</div></div>
-      <div class="rc-context" style="margin:12px 0 16px;padding:12px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;">
-        <div class="rc-context-rating" style="font-size:13px;font-weight:600;color:#111827;">${ratingHtml}</div>
-        <div class="rc-context-review" style="margin-top:6px;font-size:13px;line-height:1.45;color:#374151;">${reviewHtml}</div>
-      </div>
-      <div class="rc-body" style="display:flex;align-items:center;gap:8px">
-        <input id="rc_apiKey" type="password" placeholder="Wklej Gemini API key" class="rc-input" style="flex:1">
-        <button id="rc_save" class="rc-primary">Zapisz</button>
-        <button id="rc_close" class="rc-secondary">Zamknij</button>
-      </div>
-      <div class="rc-note" style="margin-top:8px">Klucz uzywany tylko lokalnie. Mozesz go usunac w kazdej chwili.</div>`;
-
-    panelEl.querySelector('#rc_save').onclick = async () => {
-      const keyField = panelEl.querySelector('#rc_apiKey');
-      const value = keyField?.value.trim();
-      if (!value) return;
-      await chrome.storage.sync.set({ apiKey: value });
-      renderMainPanel(panelEl, card, source);
-    };
-    panelEl.querySelector('#rc_close').onclick = ()=> dom.closeCurrentPanel();
-    panelEl.parentElement?.reposition?.();
-  }
 
   function renderMainPanel(panelEl, card, reviewSource){
     if (!panelEl.parentElement || !panelEl.parentElement.isConnected) return;

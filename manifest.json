@@ -1,17 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "Reviews Coach — Google Reviews Reply Helper",
+  "name": "Reviews Coach - Google Reviews Reply Helper",
   "version": "1.2.1",
   "description": "Robustly extracts Google review text + rating and generates reply variants via Gemini. Includes debug logs.",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
-    "*://*.google.com/*",
-    "*://*.google.pl/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://*.google.com/maps/*",
+    "https://*.google.pl/maps/*",
+    "https://business.google.com/*",
+    "https://business.google.pl/*"
   ],
   "content_scripts": [
     {
-      "matches": ["*://*.google.com/*", "*://*.google.pl/*"],
+      "matches": [
+        "https://*.google.com/maps/*",
+        "https://*.google.pl/maps/*",
+        "https://business.google.com/*",
+        "https://business.google.pl/*"
+      ],
       "js": [
         "content/namespace.js",
         "content/dom.js",
@@ -27,10 +33,16 @@
   ],
   "background": { "service_worker": "service_worker.js" },
   "action": {},
+  "options_page": "options.html",
   "web_accessible_resources": [
     {
       "resources": ["styles.css"],
-      "matches": ["*://*.google.com/*", "*://*.google.pl/*"]
+      "matches": [
+        "*://*.google.com/*",
+        "*://*.google.pl/*",
+        "*://business.google.com/*",
+        "*://business.google.pl/*"
+      ]
     }
   ]
 }

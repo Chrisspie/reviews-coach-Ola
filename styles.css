@@ -5,9 +5,10 @@
     @keyframes rcfade{ from{opacity:0; transform:translateY(4px)} to{opacity:1; transform:translateY(0)} }
     @keyframes rcspin{ to{ transform:rotate(360deg) } }
     .rc-chip-btn{ appearance:none; border:none; background:linear-gradient(180deg,#fff,#f8fafc); color:var(--rc-text);
-      border:1px solid var(--rc-border); padding:10px 14px; border-radius:999px; cursor:pointer; font: 13px/1 system-ui; margin:4px 0 0;
-      display:inline-flex; align-items:center; gap:10px; box-shadow: var(--rc-shadow); transition: transform .12s ease, background .2s ease, box-shadow .2s ease; }
-    .rc-chip-slot{ display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 0; }
+      border:1px solid var(--rc-border); padding:12px 18px; border-radius:999px; cursor:pointer; font: 13px/1 system-ui; margin:6px 0 0;
+      display:inline-flex; align-items:center; gap:10px; box-shadow: var(--rc-shadow); transition: transform .12s ease, background .2s ease, box-shadow .2s ease;
+      position:relative; z-index:20; min-height:40px; touch-action:manipulation; }
+    .rc-chip-slot{ display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 0; position:relative; z-index:10; }
     .rc-chip-btn.rc-chip-anchored{ margin-top:0; }
     .rc-chip-btn:hover{ transform:translateY(-1px); background:linear-gradient(180deg,#fff,#f1f5f9) }
     .rc-chip-btn:active{ transform:translateY(0) scale(.99) }

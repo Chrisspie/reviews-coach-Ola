@@ -1,28 +1,51 @@
-(function(){
-  const $ = (s)=>document.querySelector(s);
-  const status = $("#status");
-  const keyInput = $("#apiKey");
+﻿(function(){
+cd  const baseEl = document.getElementById('config-base');
+  const licenseEl = document.getElementById('config-license');
+  const sourceEl = document.getElementById('config-source');
+  const statusEl = document.getElementById('status');
+  const CONFIG_FILES = [
+    { label: 'config.json', path: 'config.json' },
+    { label: 'config.default.json', path: 'config.default.json' }
+  ];
 
-  function setStatus(txt, cls=''){
-    status.className = cls || 'muted';
-    status.textContent = txt;
+  function maskValue(value){
+    if (!value) return 'brak';
+    if (value.length <= 6) return '*'.repeat(value.length);
+    return value.slice(0, 3) + '...' + value.slice(-3);
   }
 
-  document.addEventListener('DOMContentLoaded', ()=>{
-    chrome.storage.sync.get({ apiKey: '' }, (cfg)=>{
-      keyInput.value = cfg.apiKey || '';
-      setStatus(cfg.apiKey ? 'Załadowano istniejący klucz.' : 'Brak klucza — wklej i zapisz.');
-    });
-  });
+  async function readConfig(candidate){
+    const url = chrome.runtime.getURL(candidate.path);
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok){ throw new Error('HTTP ' + resp.status); }
+    const data = await resp.json();
+    return {
+      file: candidate.label,
+      proxyBase: data.proxyBase || data.apiBase || '',
+      licenseKey: data.licenseKey || data.accessKey || ''
+    };
+  }
 
-  $("#save").addEventListener('click', ()=>{
-    const apiKey = (keyInput.value||'').trim();
-    chrome.storage.sync.set({ apiKey }, ()=>{
-      if (chrome.runtime.lastError){
-        setStatus('Błąd zapisu: ' + chrome.runtime.lastError.message, 'err');
+  async function init(){
+    for (const candidate of CONFIG_FILES){
+      try{
+        const cfg = await readConfig(candidate);
+        baseEl.textContent = cfg.proxyBase || 'brak';
+        licenseEl.textContent = maskValue(cfg.licenseKey);
+        sourceEl.textContent = cfg.file;
+        statusEl.textContent = `Konfiguracja pochodzi z ${cfg.file}. Aby ja zmienic, edytuj plik i przeladuj rozszerzenie.`;
+        statusEl.className = 'muted';
         return;
+      }catch(err){
+        console.warn('[RC] Nie udalo sie odczytac', candidate.label, err);
       }
-      setStatus(apiKey ? 'Zapisano. ✅' : 'Usunięto klucz.', apiKey ? 'ok' : 'muted');
-    });
-  });
+    }
+    baseEl.textContent = 'brak';
+    licenseEl.textContent = 'brak';
+    sourceEl.textContent = 'brak';
+    statusEl.textContent = 'Brak pliku config.json ani config.default.json. Dodaj go przed uruchomieniem rozszerzenia.';
+    statusEl.className = 'err';
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
 })();
