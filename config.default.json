@@ -1,4 +1,6 @@
-﻿{
-  "proxyBase": "http://localhost:3000",
-  "licenseKey": "DEV-LICENSE-PLACEHOLDER"
+{
+    "proxyBase":  "http://localhost:3000",
+    "upgradeUrl":  "https://twojadomena.com/abonament",
+    "licenseKey":  "DEV-LICENSE-PLACEHOLDER"
 }
+

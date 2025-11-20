@@ -1,6 +1,7 @@
 const DEFAULT_MODEL = 'gemini-2.0-flash';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
+const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
 const LOG_PROMPT_PREVIEW_LIMIT = 200;
 const LOG_PROMPT_ELLIPSIS = '...';
@@ -9,6 +10,7 @@ const CONFIG_PRIMARY_FILE = 'config.json';
 const CONFIG_FALLBACK_FILE = 'config.default.json';
 
 let staticConfigPromise = null;
+let quotaState = null;
 
 function truncateForLog(value, maxLen = LOG_PROMPT_PREVIEW_LIMIT){
   const str = (value || '').toString();
@@ -40,10 +42,11 @@ async function loadConfigFile(fileName){
   }
   const proxyBase = normalizeBase(parsed.proxyBase || parsed.apiBase);
   const accessKey = (parsed.licenseKey || parsed.accessKey || '').trim();
+  const upgradeUrl = (parsed.upgradeUrl || parsed.billingUrl || '').trim();
   if (!proxyBase || !accessKey){
     throw new Error('Missing proxyBase/licenseKey');
   }
-  return { proxyBase, accessKey, source: fileName };
+  return { proxyBase, accessKey, upgradeUrl, source: fileName };
 }
 
 async function loadStaticConfig(){
@@ -105,6 +108,34 @@ async function storeSession(session){
   }
 }
 
+function normalizeQuota(raw, fallbackUrl=''){
+  if (!raw || typeof raw !== 'object') return null;
+  const limit = Number(raw.limit);
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  const remainingNum = Number(raw.remaining);
+  const remaining = Number.isFinite(remainingNum) ? Math.max(0, remainingNum) : null;
+  const upgradeUrl = (raw.upgradeUrl || fallbackUrl || '').trim();
+  return { limit, remaining, upgradeUrl };
+}
+
+function updateQuotaState(quota){
+  quotaState = quota || null;
+}
+
+function getQuotaState(){
+  return quotaState;
+}
+
+function quotaFromHeaders(resp, fallbackUrl=''){
+  if (!resp || typeof resp.headers?.get !== 'function') return null;
+  const limit = Number(resp.headers.get('x-free-limit'));
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  const remainingNum = Number(resp.headers.get('x-free-remaining'));
+  const remaining = Number.isFinite(remainingNum) ? Math.max(0, remainingNum) : null;
+  const upgradeUrl = (fallbackUrl || '').trim();
+  return { limit, remaining, upgradeUrl };
+}
+
 function resolveSessionExpiry(parsed){
   if (typeof parsed.expiresIn === 'number' && Number.isFinite(parsed.expiresIn)){
     const ttlMs = Math.max(0, (parsed.expiresIn * 1000) - TOKEN_EXPIRY_GUARD_MS);
@@ -130,7 +161,9 @@ async function ensureInstallId(){
   return generated;
 }
 
-async function fetchSessionToken(proxyBase, accessKey){
+async function fetchSessionToken(settings){
+  const proxyBase = settings?.proxyBase;
+  const accessKey = settings?.accessKey;
   if (!proxyBase){ throw new Error('Brak Proxy URL w konfiguracji.'); }
   if (!accessKey){ throw new Error('Brak klucza licencyjnego w konfiguracji.'); }
   const installId = await ensureInstallId();
@@ -167,37 +200,60 @@ async function fetchSessionToken(proxyBase, accessKey){
   const token = (parsed.token || parsed.jwt || '').trim();
   if (!token) throw new Error('Proxy nie zwrocilo tokenu JWT.');
   const expiresAt = resolveSessionExpiry(parsed);
-  const session = { token, proxyBase, expiresAt };
+  const normalizedQuota = normalizeQuota(parsed.quota, settings?.upgradeUrl);
+  if (normalizedQuota) updateQuotaState(normalizedQuota);
+  const session = { token, proxyBase, expiresAt, quota: normalizedQuota };
   await storeSession(session);
   return session;
 }
 
 async function ensureSessionToken(settings){
   const cached = await getCachedSession();
-  if (isSessionValid(cached, settings.proxyBase)) return cached.token;
+  if (isSessionValid(cached, settings.proxyBase)){
+    if (cached.quota) updateQuotaState(cached.quota);
+    return cached.token;
+  }
   if (!settings.accessKey){
     throw new Error('Brak klucza licencyjnego. Uzupelnij config.json.');
   }
-  const session = await fetchSessionToken(settings.proxyBase, settings.accessKey);
+  const session = await fetchSessionToken(settings);
   return session.token;
 }
-async function incUsage(){
-  const today = new Date().toISOString().slice(0,10);
-  const u = await chrome.storage.sync.get(['usage']);
-  const usage = u.usage || { date: today, count: 0 };
-  if (usage.date !== today){ usage.date = today; usage.count = 0; }
-  usage.count++;
-  await chrome.storage.sync.set({ usage });
-  return usage;
-}
-
 function proxyErrorText(j){
   if (j && j.error && (j.error.message || j.error.status)) return (j.error.message || j.error.status);
   return null;
 }
 
+function sendLogEvent(proxySettings, token, level, message, context){
+  if (!proxySettings?.proxyBase || !token || !message) return;
+  try {
+    const payload = {
+      level: level || 'info',
+      message,
+      context: context || {},
+      timestamp: new Date().toISOString()
+    };
+    fetch(buildProxyUrl(proxySettings.proxyBase, LOG_ENDPOINT_PATH), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'X-Extension-Id': chrome.runtime.id
+      },
+      body: JSON.stringify(payload),
+      mode: 'cors',
+      cache: 'no-store',
+      credentials: 'omit'
+    }).catch(()=>{});
+  } catch (_){ }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
   (async ()=>{
+    if (msg.type === 'GET_QUOTA_STATUS'){
+      sendResponse({ quota: getQuotaState() });
+      return;
+    }
     if (msg.type === 'GENERATE_ALL'){
       const proxySettings = await getProxySettings();
       if (!proxySettings.proxyBase){ sendResponse({ error:'Brak Proxy URL. Uzupelnij plik config.json.' }); return; }
@@ -209,8 +265,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
         sendResponse({ error: err && err.message ? err.message : 'Nie udalo sie pobrac tokenu proxy.' });
         return;
       }
-      const usage = await incUsage();
-      if (usage.count > 60){ sendResponse({ error: 'Limit Free dzisiaj wyczerpany.' }); return; }
       const rating = msg.payload.rating || '?';
       const reviewText = (msg.payload.text || '').trim();
       console.log('[RC] Worker payload:', { rating, textLength: reviewText.length, sample: reviewText.slice(0, 140) });
@@ -274,6 +328,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
         cache:'no-store',
         credentials:'omit'
       };
+      sendLogEvent(proxySettings, sessionToken, 'info', 'generate_start', { rating, textLength: reviewText.length });
       let attempt = 0;
       try{
         while (attempt < 2){
@@ -285,29 +340,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
           if (resp.status === 401 && attempt === 0){
             attempt++;
             console.warn('[RC] JWT rejected by proxy, refreshing session.');
-            const refreshedSession = await fetchSessionToken(proxySettings.proxyBase, proxySettings.accessKey);
+            const refreshedSession = await fetchSessionToken(proxySettings);
             sessionToken = refreshedSession.token;
             continue;
           }
+          const quotaFromResp = quotaFromHeaders(resp, proxySettings.upgradeUrl);
           const raw = await resp.text();
           let j = null;
           try {
             j = raw ? JSON.parse(raw) : {};
           } catch (_){
             if (!resp.ok){
-              sendResponse({ error: `Blad proxy (${resp.status})` });
+              sendResponse({ error: `Blad proxy (${resp.status})`, quota: quotaFromResp });
+              if (quotaFromResp) updateQuotaState(quotaFromResp);
               return;
             }
-            sendResponse({ error: 'Niepoprawna odpowiedz proxy.' });
+            sendResponse({ error: 'Niepoprawna odpowiedz proxy.', quota: quotaFromResp });
+            if (quotaFromResp) updateQuotaState(quotaFromResp);
             return;
           }
           if (!resp.ok){
             const proxyErr = proxyErrorText(j) || j.error || resp.statusText || 'Blad proxy.';
-            sendResponse({ error: proxyErr });
+            const enriched = quotaFromResp || normalizeQuota(j?.quota, proxySettings.upgradeUrl);
+            if (enriched) updateQuotaState(enriched);
+            sendResponse({ error: proxyErr, errorCode: j?.code, freeLimit: j?.limit, upgradeUrl: j?.upgradeUrl || proxySettings.upgradeUrl, quota: enriched });
+            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_rejected', { error: proxyErr, code: j?.code, remaining: enriched?.remaining });
             return;
           }
           const err = proxyErrorText(j);
-          if (err) { sendResponse({ error: err }); return; }
+          if (err) {
+            if (quotaFromResp) updateQuotaState(quotaFromResp);
+            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_error', { error: err, remaining: quotaFromResp?.remaining });
+            sendResponse({ error: err, quota: quotaFromResp });
+            return;
+          }
           const text = (j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts)
             ? j.candidates[0].content.parts.map(p=>p.text||'').join('\n')
             : '';
@@ -325,10 +391,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
             brief = parts[1] || '';
             proactive = parts[2] || '';
           }
-          sendResponse({ soft, brief, proactive, _prompt: promptPayload });
+          if (quotaFromResp) updateQuotaState(quotaFromResp);
+          sendLogEvent(proxySettings, sessionToken, 'info', 'generate_success', { rating, remaining: quotaFromResp?.remaining, limit: quotaFromResp?.limit });
+          sendResponse({ soft, brief, proactive, _prompt: promptPayload, quota: quotaFromResp });
           return;
         }
       }catch(e){
+        sendLogEvent(proxySettings, sessionToken, 'error', 'generate_exception', { error: String(e), rating });
         sendResponse({ error: String(e) });
       }
       return;

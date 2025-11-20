@@ -158,6 +158,47 @@
     }
   };
 
+  function updateQuotaInfo(panelEl, quota){
+    const box = panelEl.querySelector('#rc_quota');
+    const upgradeBtn = panelEl.querySelector('#rc_upgrade');
+    if (!box) return;
+    box.innerHTML = '';
+    box.classList.remove('rc-quota-warning');
+    box.style.display = 'none';
+    if (upgradeBtn){
+      upgradeBtn.style.display = 'none';
+      upgradeBtn.removeAttribute('data-url');
+    }
+    if (!quota || !quota.limit) return;
+    const limit = Number(quota.limit);
+    if (!Number.isFinite(limit) || limit <= 0) return;
+    const remaining = Math.max(0, Number(quota.remaining ?? 0));
+    box.style.display = 'block';
+    if (remaining > 0){
+      box.textContent = `Pozostało ${remaining} z ${limit} darmowych odpowiedzi dzisiaj.`;
+      return;
+    }
+    box.classList.add('rc-quota-warning');
+    const text = document.createElement('span');
+    text.textContent = `Limit ${limit} darmowych odpowiedzi został wykorzystany.`;
+    box.appendChild(text);
+    const upgradeUrl = (quota.upgradeUrl || '').trim();
+    if (upgradeUrl){
+      box.appendChild(document.createTextNode(' '));
+      const link = document.createElement('a');
+      link.href = upgradeUrl;
+      link.target = '_blank';
+      link.rel = 'noreferrer noopener';
+      link.textContent = 'Kup abonament';
+      link.className = 'rc-link';
+      box.appendChild(link);
+      if (upgradeBtn){
+        upgradeBtn.dataset.url = upgradeUrl;
+        upgradeBtn.style.display = 'inline-flex';
+      }
+    }
+  }
+
   function renderMainPanel(panelEl, card, reviewSource){
     if (!panelEl.parentElement || !panelEl.parentElement.isConnected) return;
     const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
@@ -175,9 +216,11 @@
         </div>
       </div>
       <div class="rc-preview" id="rc_preview"><div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuje...</span></div></div>
+      <div id="rc_quota" class="rc-quota"></div>
       <div class="rc-actions">
         <button id="rc_copy" class="rc-primary">Skopiuj wygenerowana odpowiedz</button>
         <button id="rc_regen" class="rc-secondary">Regeneruj</button>
+        <button id="rc_upgrade" class="rc-primary rc-upgrade" style="display:none">Kup abonament</button>
         <button id="rc_close" class="rc-secondary">Zamknij</button>
         <span class="rc-note">Kopiuje do schowka i otwiera okno odpowiedzi.</span>
       </div>
@@ -208,19 +251,37 @@
         return;
       }
       dom.showToast('Skopiowano do schowka.');
-      await panelApi.openReplyPopup(targetHash, card);
+      await panelApi.openReplyPopup(targetHash, card, { suppressWarnings: true });
     };
 
     panelEl.querySelector('#rc_regen').onclick = ()=>{
-      variants.soft = variants.brief = variants.proactive = '';
       panelEl.querySelector('#rc_err').textContent = '';
       panelApi.generateReplies(panelEl, card, variants, true, { text: reviews.extractText(card), rating: reviews.extractRating(card) });
     };
 
     panelEl.querySelector('#rc_close').onclick = ()=> dom.closeCurrentPanel();
 
+    const upgradeBtn = panelEl.querySelector('#rc_upgrade');
+    if (upgradeBtn){
+      upgradeBtn.addEventListener('click', ()=>{
+        const url = (upgradeBtn.dataset.url || '').trim();
+        if (!url){
+          dom.showToast('Brak linku do abonamentu.');
+          return;
+        }
+        try {
+          window.open(url, '_blank', 'noopener');
+        } catch (_){
+          window.location.href = url;
+        }
+      });
+    }
+
     panelApi.generateReplies(panelEl, card, variants, false, { text: reviewText, rating: reviewRating });
     panelEl.parentElement?.reposition?.();
+    chrome.runtime.sendMessage({ type: 'GET_QUOTA_STATUS' }, (resp)=>{
+      if (panelEl.isConnected) updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
+    });
   }
 
   panelApi.generateReplies = function generateReplies(panelEl, card, variants, force, reviewSource){
@@ -245,9 +306,16 @@
     chrome.runtime.sendMessage({ type: 'GENERATE_ALL', payload }, (resp)=>{
       if (!panelEl.isConnected) return;
       const errorBox = panelEl.querySelector('#rc_err');
+      updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
       if (!resp || resp.error){
         errorBox.textContent = resp?.error || 'Blad generowania (sprawdz klucz).';
-        preview.textContent = '...';
+        if (resp?.errorCode === 'FREE_LIMIT_REACHED' && resp?.upgradeUrl){
+          const quota = resp?.quota || { limit: resp.freeLimit || 0, remaining: 0, upgradeUrl: resp.upgradeUrl };
+          updateQuotaInfo(panelEl, quota);
+        }
+        const activeStyle = seg.querySelector('.active')?.dataset.style || 'soft';
+        const fallback = variants[activeStyle] || variants.soft || variants.brief || variants.proactive || '...';
+        preview.textContent = fallback;
         panelEl.parentElement?.reposition?.();
         return;
       }
@@ -285,11 +353,12 @@
     return ok;
   };
 
-  panelApi.openReplyPopup = async function openReplyPopup(targetHash, fallbackCard){
+  panelApi.openReplyPopup = async function openReplyPopup(targetHash, fallbackCard, options = {}){
+    const suppressWarnings = Boolean(options && options.suppressWarnings);
     let card = chips.findCardForHash(targetHash);
     if ((!card || !card.isConnected) && fallbackCard?.isConnected) card = fallbackCard;
     if (!card){
-      dom.showToast('Nie moge znalezc opinii. Sprobuj ponownie.');
+      if (!suppressWarnings) dom.showToast('Nie moge znalezc opinii. Sprobuj ponownie.');
       return;
     }
 
@@ -325,7 +394,7 @@
     }, 4200, 150);
 
     if (!target){
-      dom.showToast('Nie moge otworzyc pola odpowiedzi. Otworz je recznie i wklej odpowiedz.');
+      if (!suppressWarnings) dom.showToast('Nie moge otworzyc pola odpowiedzi. Otworz je recznie i wklej odpowiedz.');
       return;
     }
 

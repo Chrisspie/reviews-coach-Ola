@@ -28,9 +28,12 @@
     .rc-seg button{ padding:8px 12px; border:none; background:#fff; cursor:pointer; font:13px system-ui; transition: background .15s ease }
     .rc-seg button.active{ background:var(--rc-accent); color:#fff }
     .rc-preview{ white-space:pre-wrap; color:#0f172a; font-size:14px; border:1px solid var(--rc-border); border-radius:12px; padding:12px; min-height:70px; background:#fff }
+    .rc-quota{ font-size:12px; color:var(--rc-muted); margin-top:6px; display:none }
+    .rc-quota.rc-quota-warning{ color:#b91c1c; font-weight:600 }
     .rc-actions{ display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap }
     .rc-primary{ background:var(--rc-accent); color:#fff; border:none; padding:10px 14px; border-radius:10px; cursor:pointer; font: 14px/1 system-ui; }
     .rc-secondary{ border:1px solid var(--rc-border); background:#fff; color:#0f172a; padding:10px 14px; border-radius:10px; cursor:pointer }
+    .rc-upgrade{ display:none; background:#db2777 }
     .rc-note{ font-size:12px; color:var(--rc-muted) }
     .rc-error{ color:#b91c1c; font-size:13px; margin-top:6px }
     .rc-input{ padding:10px;border:1px solid var(--rc-border);border-radius:10px; font: 14px system-ui }

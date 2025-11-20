@@ -10,7 +10,8 @@ Rozszerzenie nie wyswietla zadnych formularzy konfiguracyjnych. Wartosci potrzeb
 ```json
 {
   "proxyBase": "https://proxy.twojadomena.com",
-  "licenseKey": "PROD-LICENSE-XXXX"
+  "licenseKey": "PROD-LICENSE-XXXX",
+  "upgradeUrl": "https://twojadomena.com/abonament"
 }
 ```
 
@@ -19,6 +20,7 @@ Rozszerzenie nie wyswietla zadnych formularzy konfiguracyjnych. Wartosci potrzeb
 1. Skopiuj `config.default.json` do `config.json`.
 2. Ustaw docelowy adres HTTPS serwera proxy (`proxyBase`).
 3. Wygeneruj unikalny `licenseKey` i dopisz go na backendzie do zmiennej `LICENSE_KEYS`.
-4. Odswiez rozszerzenie (lub zbuduj CRX) – service worker odczyta `config.json` i automatycznie pobierze token sesyjny z `/api/extension/session` zaraz po starcie.
+4. Opcjonalnie ustaw `upgradeUrl` – link do strony zakupu abonamentu, pokazywany uzytkownikowi po wyczerpaniu darmowego limitu.
+5. Odswiez rozszerzenie (lub zbuduj CRX) - service worker odczyta `config.json` i automatycznie pobierze token sesyjny z `/api/extension/session` zaraz po starcie.
 
 Dzieki temu uzytkownik po instalacji natychmiast ma dostep do gotowego narzedzia, a klucz Gemini pozostaje zawsze na backendzie.
