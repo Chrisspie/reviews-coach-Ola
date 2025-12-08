@@ -1,5 +1,6 @@
 const DEFAULT_MODEL = 'gemini-2.0-flash';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
+const GOOGLE_SESSION_ENDPOINT_PATH = '/api/extension/google-session';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
 const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
@@ -8,6 +9,11 @@ const LOG_PROMPT_ELLIPSIS = '...';
 const INSTALL_ID_KEY = 'rcInstallId';
 const CONFIG_PRIMARY_FILE = 'config.json';
 const CONFIG_FALLBACK_FILE = 'config.default.json';
+
+const GOOGLE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
+const GOOGLE_PROFILE_KEY = 'rcGoogleProfile';
+const GOOGLE_USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/userinfo';
+const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
 
 let staticConfigPromise = null;
 let quotaState = null;
@@ -41,12 +47,27 @@ async function loadConfigFile(fileName){
     throw new Error('Invalid JSON');
   }
   const proxyBase = normalizeBase(parsed.proxyBase || parsed.apiBase);
-  const accessKey = (parsed.licenseKey || parsed.accessKey || '').trim();
   const upgradeUrl = (parsed.upgradeUrl || parsed.billingUrl || '').trim();
-  if (!proxyBase || !accessKey){
-    throw new Error('Missing proxyBase/licenseKey');
+  const devSections = [];
+  if (parsed.dev && typeof parsed.dev === 'object'){ devSections.push(parsed.dev); }
+  if (parsed.devMode && typeof parsed.devMode === 'object'){ devSections.push(parsed.devMode); }
+  const devCandidates = [parsed.devMockGoogleEmail, parsed.devGoogleMockEmail, parsed.devGoogleEmail];
+  devSections.forEach(section => {
+    if (section && typeof section === 'object'){
+      devCandidates.push(section.googleMockEmail, section.googleEmail);
+    }
+  });
+  let devMockGoogleEmail = '';
+  for (const candidate of devCandidates){
+    if (typeof candidate === 'string' && candidate.trim()){
+      devMockGoogleEmail = candidate.trim();
+      break;
+    }
   }
-  return { proxyBase, accessKey, upgradeUrl, source: fileName };
+  if (!proxyBase){
+    throw new Error('Missing proxyBase in config file');
+  }
+  return { proxyBase, upgradeUrl, source: fileName, devMockGoogleEmail };
 }
 
 async function loadStaticConfig(){
@@ -69,10 +90,10 @@ async function loadStaticConfig(){
 
 async function getProxySettings(){
   const cfg = await loadStaticConfig();
-  if (cfg && cfg.proxyBase && cfg.accessKey){
+  if (cfg && cfg.proxyBase){
     return cfg;
   }
-  throw new Error('Brak config.json: ustaw proxyBase i licenseKey w pliku konfiguracji.');
+  throw new Error('Brak config.json: ustaw proxyBase w pliku konfiguracji.');
 }
 
 function buildProxyUrl(base, path){
@@ -110,12 +131,37 @@ async function storeSession(session){
 
 function normalizeQuota(raw, fallbackUrl=''){
   if (!raw || typeof raw !== 'object') return null;
-  const limit = Number(raw.limit);
-  if (!Number.isFinite(limit) || limit <= 0) return null;
-  const remainingNum = Number(raw.remaining);
-  const remaining = Number.isFinite(remainingNum) ? Math.max(0, remainingNum) : null;
   const upgradeUrl = (raw.upgradeUrl || fallbackUrl || '').trim();
-  return { limit, remaining, upgradeUrl };
+  const type = typeof raw.type === 'string' ? raw.type.toLowerCase() : null;
+  if (type === 'time'){
+    const limitSeconds = Number(raw.limitSeconds ?? raw.limit);
+    if (!Number.isFinite(limitSeconds) || limitSeconds <= 0) return null;
+    const remainingSecondsRaw = Number(raw.remainingSeconds ?? raw.remaining);
+    const remainingSeconds = Number.isFinite(remainingSecondsRaw) ? Math.max(0, Math.floor(remainingSecondsRaw)) : null;
+    const expiresAt = raw.expiresAt ? new Date(raw.expiresAt).toISOString() : null;
+    return {
+      type: 'time',
+      limit: null,
+      remaining: null,
+      limitSeconds: Math.max(0, Math.floor(limitSeconds)),
+      remainingSeconds,
+      expiresAt,
+      upgradeUrl
+    };
+  }
+  const limit = Number(raw.limit ?? raw.limitSeconds);
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  const remainingNum = Number(raw.remaining ?? raw.remainingSeconds);
+  const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
+  return {
+    type: 'usage',
+    limit: Math.max(0, Math.floor(limit)),
+    remaining,
+    limitSeconds: null,
+    remainingSeconds: null,
+    expiresAt: null,
+    upgradeUrl
+  };
 }
 
 function updateQuotaState(quota){
@@ -128,12 +174,52 @@ function getQuotaState(){
 
 function quotaFromHeaders(resp, fallbackUrl=''){
   if (!resp || typeof resp.headers?.get !== 'function') return null;
+  const mode = (resp.headers.get('x-free-mode') || '').toLowerCase();
+  const upgradeUrl = (resp.headers.get('x-free-upgrade-url') || fallbackUrl || '').trim();
+  if (mode === 'time'){
+    const limitSecondsRaw = Number(resp.headers.get('x-free-limit-seconds') ?? resp.headers.get('x-free-limit'));
+    if (!Number.isFinite(limitSecondsRaw) || limitSecondsRaw <= 0) return null;
+    const remainingSecondsRaw = Number(resp.headers.get('x-free-remaining-seconds') ?? resp.headers.get('x-free-remaining'));
+    const remainingSeconds = Number.isFinite(remainingSecondsRaw) ? Math.max(0, Math.floor(remainingSecondsRaw)) : null;
+    const expiresAtHeader = resp.headers.get('x-free-expires-at');
+    const expiresAt = expiresAtHeader ? new Date(expiresAtHeader).toISOString() : null;
+    return {
+      type: 'time',
+      limit: null,
+      remaining: null,
+      limitSeconds: Math.max(0, Math.floor(limitSecondsRaw)),
+      remainingSeconds,
+      expiresAt,
+      upgradeUrl
+    };
+  }
   const limit = Number(resp.headers.get('x-free-limit'));
   if (!Number.isFinite(limit) || limit <= 0) return null;
   const remainingNum = Number(resp.headers.get('x-free-remaining'));
-  const remaining = Number.isFinite(remainingNum) ? Math.max(0, remainingNum) : null;
-  const upgradeUrl = (fallbackUrl || '').trim();
-  return { limit, remaining, upgradeUrl };
+  const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
+  return {
+    type: 'usage',
+    limit: Math.max(0, Math.floor(limit)),
+    remaining,
+    limitSeconds: null,
+    remainingSeconds: null,
+    expiresAt: null,
+    upgradeUrl
+  };
+}
+
+function quotaLimitValue(quota){
+  if (!quota) return null;
+  if (typeof quota.limit === 'number') return quota.limit;
+  if (typeof quota.limitSeconds === 'number') return quota.limitSeconds;
+  return null;
+}
+
+function quotaRemainingValue(quota){
+  if (!quota) return null;
+  if (typeof quota.remaining === 'number') return quota.remaining;
+  if (typeof quota.remainingSeconds === 'number') return quota.remainingSeconds;
+  return null;
 }
 
 function resolveSessionExpiry(parsed){
@@ -161,15 +247,117 @@ async function ensureInstallId(){
   return generated;
 }
 
-async function fetchSessionToken(settings){
+async function getStoredGoogleProfile(){
+  const stored = await chrome.storage.local.get([GOOGLE_PROFILE_KEY]);
+  return stored?.[GOOGLE_PROFILE_KEY] || null;
+}
+
+async function storeGoogleProfile(profile){
+  if (!profile) return;
+  const payload = {}; payload[GOOGLE_PROFILE_KEY] = profile;
+  await chrome.storage.local.set(payload);
+}
+
+async function clearGoogleProfile(){
+  await chrome.storage.local.remove([GOOGLE_PROFILE_KEY]);
+}
+
+function identityGetAuthToken(options){
+  return new Promise((resolve, reject)=>{
+    chrome.identity.getAuthToken(options, token => {
+      if (chrome.runtime.lastError || !token){
+        const message = chrome.runtime.lastError?.message || 'Token Google nie jest dostepny.';
+        reject(new Error(message));
+        return;
+      }
+      resolve(token);
+    });
+  });
+}
+
+function removeCachedAuthToken(token){
+  return new Promise((resolve)=>{
+    if (!token){ resolve(); return; }
+    chrome.identity.removeCachedAuthToken({ token }, ()=> resolve());
+  });
+}
+
+async function obtainGoogleAccessToken(interactive=false){
+  try {
+    return await identityGetAuthToken({ interactive, scopes: [GOOGLE_OAUTH_SCOPE] });
+  }catch(err){
+    if (!interactive){
+      const authErr = new Error('Musisz polaczyc rozszerzenie z kontem Google (zakladka Opcje).');
+      authErr.code = AUTH_REQUIRED_CODE;
+      throw authErr;
+    }
+    throw err;
+  }
+}
+
+async function fetchGoogleProfile(accessToken){
+  const resp = await fetch(GOOGLE_USERINFO_ENDPOINT, {
+    headers: { 'Authorization': `Bearer ${accessToken}` },
+    cache: 'no-store'
+  });
+  if (!resp.ok){ throw new Error('Nie udalo sie pobrac danych konta Google.'); }
+  const data = await resp.json();
+  return {
+    email: (data.email || '').toString(),
+    sub: (data.sub || '').toString(),
+    name: (data.name || '').toString(),
+    picture: (data.picture || '').toString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function ensureGoogleIdentity(interactive=false, devMockGoogleEmail=''){
+  const mockEmail = (devMockGoogleEmail || '').trim();
+  if (mockEmail){
+    const profile = {
+      email: mockEmail,
+      sub: mockEmail,
+      name: mockEmail,
+      picture: '',
+      updatedAt: new Date().toISOString()
+    };
+    await storeGoogleProfile(profile);
+    return { accessToken: mockEmail, profile };
+  }
+  const token = await obtainGoogleAccessToken(interactive);
+  let profile = null;
+  try {
+    profile = await fetchGoogleProfile(token);
+    await storeGoogleProfile(profile);
+  } catch (err){
+    console.warn('[RC] Nie udalo sie pobrac profilu Google', err);
+  }
+  return { accessToken: token, profile };
+}
+
+async function clearStoredSession(){
+  const storageArea = getProxySessionStorage();
+  await storageArea.remove(['proxySession']);
+}
+
+async function logoutGoogle(){
+  let token = null;
+  try {
+    token = await identityGetAuthToken({ interactive: false, scopes: [GOOGLE_OAUTH_SCOPE] });
+  } catch (_){ token = null; }
+  await removeCachedAuthToken(token);
+  await clearGoogleProfile();
+  await clearStoredSession();
+}
+
+async function fetchSessionToken(settings, options = {}){
   const proxyBase = settings?.proxyBase;
-  const accessKey = settings?.accessKey;
   if (!proxyBase){ throw new Error('Brak Proxy URL w konfiguracji.'); }
-  if (!accessKey){ throw new Error('Brak klucza licencyjnego w konfiguracji.'); }
+  const { accessToken: googleToken, profile } = await ensureGoogleIdentity(Boolean(options.interactive), settings?.devMockGoogleEmail || '');
   const installId = await ensureInstallId();
-  const tokenUrl = buildProxyUrl(proxyBase, SESSION_ENDPOINT_PATH);
+  const tokenUrl = buildProxyUrl(proxyBase, GOOGLE_SESSION_ENDPOINT_PATH);
   const body = {
-    licenseKey: accessKey,
+    accessToken: googleToken,
     extensionId: chrome.runtime.id,
     version: chrome.runtime.getManifest().version,
     installId
@@ -202,21 +390,28 @@ async function fetchSessionToken(settings){
   const expiresAt = resolveSessionExpiry(parsed);
   const normalizedQuota = normalizeQuota(parsed.quota, settings?.upgradeUrl);
   if (normalizedQuota) updateQuotaState(normalizedQuota);
+  if (parsed.profile){
+    await storeGoogleProfile({
+      email: (parsed.profile.email || profile?.email || '').toString(),
+      name: (parsed.profile.name || profile?.name || '').toString(),
+      sub: (parsed.profile.sub || profile?.sub || '').toString(),
+      updatedAt: new Date().toISOString()
+    });
+  } else if (profile){
+    await storeGoogleProfile(profile);
+  }
   const session = { token, proxyBase, expiresAt, quota: normalizedQuota };
   await storeSession(session);
   return session;
 }
 
-async function ensureSessionToken(settings){
+async function ensureSessionToken(settings, options = {}){
   const cached = await getCachedSession();
   if (isSessionValid(cached, settings.proxyBase)){
     if (cached.quota) updateQuotaState(cached.quota);
     return cached.token;
   }
-  if (!settings.accessKey){
-    throw new Error('Brak klucza licencyjnego. Uzupelnij config.json.');
-  }
-  const session = await fetchSessionToken(settings);
+  const session = await fetchSessionToken(settings, options);
   return session.token;
 }
 function proxyErrorText(j){
@@ -254,15 +449,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
       sendResponse({ quota: getQuotaState() });
       return;
     }
+    if (msg.type === 'GET_GOOGLE_STATUS'){
+      const profile = await getStoredGoogleProfile();
+      sendResponse({ profile });
+      return;
+    }
+    if (msg.type === 'START_GOOGLE_LOGIN'){
+      try {
+        const proxySettings = await getProxySettings();
+        const result = await ensureGoogleIdentity(true, proxySettings?.devMockGoogleEmail || '');
+        await clearStoredSession();
+        sendResponse({ ok: true, profile: result.profile });
+      } catch (err){
+        const message = err && err.message ? err.message : 'Nie udalo sie polaczyc z kontem Google.';
+        sendResponse({ error: message });
+      }
+      return;
+    }
+    if (msg.type === 'GOOGLE_LOGOUT'){
+      await logoutGoogle();
+      sendResponse({ ok: true });
+      return;
+    }
     if (msg.type === 'GENERATE_ALL'){
       const proxySettings = await getProxySettings();
       if (!proxySettings.proxyBase){ sendResponse({ error:'Brak Proxy URL. Uzupelnij plik config.json.' }); return; }
       let sessionToken = '';
       try{
-        sessionToken = await ensureSessionToken(proxySettings);
+        sessionToken = await ensureSessionToken(proxySettings, { interactive: true });
       }catch(err){
         console.error('[RC] Nie udalo sie pobrac tokenu proxy', err);
-        sendResponse({ error: err && err.message ? err.message : 'Nie udalo sie pobrac tokenu proxy.' });
+        const message = err && err.message ? err.message : 'Nie udalo sie pobrac tokenu proxy.';
+        sendResponse({ error: message, errorCode: err && err.code ? err.code : undefined });
         return;
       }
       const rating = msg.payload.rating || '?';
@@ -340,7 +558,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
           if (resp.status === 401 && attempt === 0){
             attempt++;
             console.warn('[RC] JWT rejected by proxy, refreshing session.');
-            const refreshedSession = await fetchSessionToken(proxySettings);
+            const refreshedSession = await fetchSessionToken(proxySettings, { interactive: false });
             sessionToken = refreshedSession.token;
             continue;
           }
@@ -364,13 +582,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
             const enriched = quotaFromResp || normalizeQuota(j?.quota, proxySettings.upgradeUrl);
             if (enriched) updateQuotaState(enriched);
             sendResponse({ error: proxyErr, errorCode: j?.code, freeLimit: j?.limit, upgradeUrl: j?.upgradeUrl || proxySettings.upgradeUrl, quota: enriched });
-            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_rejected', { error: proxyErr, code: j?.code, remaining: enriched?.remaining });
+            const remainingForLog = quotaRemainingValue(enriched);
+            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_rejected', { error: proxyErr, code: j?.code, remaining: remainingForLog, quotaType: enriched?.type });
             return;
           }
           const err = proxyErrorText(j);
           if (err) {
             if (quotaFromResp) updateQuotaState(quotaFromResp);
-            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_error', { error: err, remaining: quotaFromResp?.remaining });
+            const logRemaining = quotaRemainingValue(quotaFromResp);
+            sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_error', { error: err, remaining: logRemaining, quotaType: quotaFromResp?.type });
             sendResponse({ error: err, quota: quotaFromResp });
             return;
           }
@@ -392,7 +612,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
             proactive = parts[2] || '';
           }
           if (quotaFromResp) updateQuotaState(quotaFromResp);
-          sendLogEvent(proxySettings, sessionToken, 'info', 'generate_success', { rating, remaining: quotaFromResp?.remaining, limit: quotaFromResp?.limit });
+          const logRemaining = quotaRemainingValue(quotaFromResp);
+          const logLimit = quotaLimitValue(quotaFromResp);
+          sendLogEvent(proxySettings, sessionToken, 'info', 'generate_success', { rating, remaining: logRemaining, limit: logLimit, quotaType: quotaFromResp?.type });
           sendResponse({ soft, brief, proactive, _prompt: promptPayload, quota: quotaFromResp });
           return;
         }
@@ -405,3 +627,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
   })();
   return true;
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { normalizeBase, loadConfigFile, ensureGoogleIdentity };
+}
+

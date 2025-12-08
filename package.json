@@ -4,7 +4,7 @@
   "description": "",
   "main": "content/index.js",
   "scripts": {
-    "test": "node tests/extraction.test.js && node tests/inject.test.js && node tests/panel.test.js"
+    "test": "node tests/extraction.test.js && node tests/inject.test.js && node tests/panel.test.js && node tests/service-worker.test.js"
   },
   "keywords": [],
   "author": "",

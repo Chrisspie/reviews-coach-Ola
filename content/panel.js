@@ -158,6 +158,38 @@
     }
   };
 
+  function formatTrialDuration(seconds){
+    if (!Number.isFinite(seconds)) return null;
+    const total = Math.max(0, Math.floor(seconds));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const parts = [];
+    if (days > 0){
+      parts.push(`${days} ${days === 1 ? 'dzień' : 'dni'}`);
+    }
+    if (hours > 0 && parts.length < 2){
+      parts.push(`${hours} godz.`);
+    }
+    if (days === 0 && minutes > 0 && parts.length < 2){
+      parts.push(`${minutes} min`);
+    }
+    if (!parts.length) return 'mniej niż minutę';
+    return parts.join(' ');
+  }
+
+  function getRemainingSeconds(quota){
+    if (!quota) return null;
+    if (typeof quota.remainingSeconds === 'number') return quota.remainingSeconds;
+    if (quota.expiresAt){
+      const ts = new Date(quota.expiresAt).getTime();
+      if (!Number.isNaN(ts)){
+        return Math.max(0, Math.floor((ts - Date.now()) / 1000));
+      }
+    }
+    return null;
+  }
+
   function updateQuotaInfo(panelEl, quota){
     const box = panelEl.querySelector('#rc_quota');
     const upgradeBtn = panelEl.querySelector('#rc_upgrade');
@@ -169,21 +201,11 @@
       upgradeBtn.style.display = 'none';
       upgradeBtn.removeAttribute('data-url');
     }
-    if (!quota || !quota.limit) return;
-    const limit = Number(quota.limit);
-    if (!Number.isFinite(limit) || limit <= 0) return;
-    const remaining = Math.max(0, Number(quota.remaining ?? 0));
-    box.style.display = 'block';
-    if (remaining > 0){
-      box.textContent = `Pozostało ${remaining} z ${limit} darmowych odpowiedzi dzisiaj.`;
-      return;
-    }
-    box.classList.add('rc-quota-warning');
-    const text = document.createElement('span');
-    text.textContent = `Limit ${limit} darmowych odpowiedzi został wykorzystany.`;
-    box.appendChild(text);
+    if (!quota) return;
     const upgradeUrl = (quota.upgradeUrl || '').trim();
-    if (upgradeUrl){
+    const type = quota.type || (quota.limit ? 'usage' : null);
+    const attachUpgradeCta = ()=>{
+      if (!upgradeUrl) return;
       box.appendChild(document.createTextNode(' '));
       const link = document.createElement('a');
       link.href = upgradeUrl;
@@ -196,7 +218,44 @@
         upgradeBtn.dataset.url = upgradeUrl;
         upgradeBtn.style.display = 'inline-flex';
       }
+    };
+    if (type === 'time'){
+      box.style.display = 'block';
+      const remainingSeconds = getRemainingSeconds(quota);
+      if (Number.isFinite(remainingSeconds) && remainingSeconds > 0){
+        const human = formatTrialDuration(remainingSeconds) || '';
+        const expiresAt = quota.expiresAt ? new Date(quota.expiresAt) : null;
+        const expiresLabel = expiresAt && !Number.isNaN(expiresAt.getTime())
+          ? expiresAt.toLocaleString(navigator.language || 'pl-PL', { dateStyle: 'short', timeStyle: 'short' })
+          : null;
+        box.textContent = human ? `Darmowy okres próbny kończy się za ${human}.` : 'Darmowy okres próbny nadal trwa.';
+        if (expiresLabel){
+          const extra = document.createElement('span');
+          extra.textContent = ` (do ${expiresLabel})`;
+          box.appendChild(extra);
+        }
+        return;
+      }
+      box.classList.add('rc-quota-warning');
+      const text = document.createElement('span');
+      text.textContent = 'Darmowy okres próbny wygasł.';
+      box.appendChild(text);
+      attachUpgradeCta();
+      return;
     }
+    const limit = Number(quota.limit);
+    if (!Number.isFinite(limit) || limit <= 0) return;
+    const remaining = Math.max(0, Number(quota.remaining ?? 0));
+    box.style.display = 'block';
+    if (remaining > 0){
+      box.textContent = `Pozostało ${remaining} z ${limit} darmowych odpowiedzi.`;
+      return;
+    }
+    box.classList.add('rc-quota-warning');
+    const text = document.createElement('span');
+    text.textContent = `Limit ${limit} darmowych odpowiedzi został wykorzystany.`;
+    box.appendChild(text);
+    attachUpgradeCta();
   }
 
   function renderMainPanel(panelEl, card, reviewSource){
@@ -309,6 +368,10 @@
       updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
       if (!resp || resp.error){
         errorBox.textContent = resp?.error || 'Blad generowania (sprawdz klucz).';
+        if (resp?.errorCode === 'AUTH_REQUIRED'){
+          panelEl.parentElement?.reposition?.();
+          return;
+        }
         if (resp?.errorCode === 'FREE_LIMIT_REACHED' && resp?.upgradeUrl){
           const quota = resp?.quota || { limit: resp.freeLimit || 0, remaining: 0, upgradeUrl: resp.upgradeUrl };
           updateQuotaInfo(panelEl, quota);
