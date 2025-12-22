@@ -206,14 +206,6 @@
     const type = quota.type || (quota.limit ? 'usage' : null);
     const attachUpgradeCta = ()=>{
       if (!upgradeUrl) return;
-      box.appendChild(document.createTextNode(' '));
-      const link = document.createElement('a');
-      link.href = upgradeUrl;
-      link.target = '_blank';
-      link.rel = 'noreferrer noopener';
-      link.textContent = 'Kup abonament';
-      link.className = 'rc-link';
-      box.appendChild(link);
       if (upgradeBtn){
         upgradeBtn.dataset.url = upgradeUrl;
         upgradeBtn.style.display = 'inline-flex';
@@ -252,9 +244,7 @@
       return;
     }
     box.classList.add('rc-quota-warning');
-    const text = document.createElement('span');
-    text.textContent = `Limit ${limit} darmowych odpowiedzi został wykorzystany.`;
-    box.appendChild(text);
+    box.textContent = '';
     attachUpgradeCta();
   }
 
@@ -367,7 +357,11 @@
       const errorBox = panelEl.querySelector('#rc_err');
       updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
       if (!resp || resp.error){
-        errorBox.textContent = resp?.error || 'Blad generowania (sprawdz klucz).';
+        let errorMessage = resp?.error || 'Blad generowania (sprawdz klucz).';
+        if (resp?.errorCode === 'FREE_LIMIT_REACHED'){
+          errorMessage = 'Limit darmowych odpowiedzi został wykorzystany.';
+        }
+        errorBox.textContent = errorMessage;
         if (resp?.errorCode === 'AUTH_REQUIRED'){
           panelEl.parentElement?.reposition?.();
           return;
