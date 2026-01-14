@@ -4,25 +4,21 @@ Rozszerzenie nie wyswietla zadnych formularzy konfiguracyjnych. Backendowy adres
 
 ## Pliki
 
-- `config.default.json` – wersja developerska (domyslnie wskazuje `http://localhost:3000`).
-- `config.json` – docelowa konfiguracja na produkcje. Plik jest dodany do `.gitignore`, dlatego przed publikacja trzeba skopiowac `config.default.json` pod nowa nazwe i uzupelnic prawdziwe dane.
+- `main.config.default.json` – wersja developerska (domyslnie wskazuje `http://localhost:3000`).
+- `main.config.json` – docelowa konfiguracja na produkcje. Plik jest dodany do `.gitignore`, dlatego przed publikacja trzeba skopiowac `main.config.default.json` pod nowa nazwe i uzupelnic prawdziwe dane.
 
 ```json
 {
   "proxyBase": "https://proxy.twojadomena.com",
   "upgradeUrl": "https://twojadomena.com/abonament",
-  "devMockGoogleEmail": "tester@example.com"
+  "licenseKey": "YOUR-LICENSE-KEY"
 }
 ```
 
-Pole `devMockGoogleEmail` jest opcjonalne – jeżeli je ustawisz, rozszerzenie nie będzie wołało Google OAuth i zawsze wyśle wskazany e-mail do backendu (idealne do testów). Przed publikacją produkcyjną usuń tę wartość lub zostaw pusty string.
+Pole `licenseKey` jest opcjonalne. Jeśli je ustawisz, rozszerzenie wyśle `licenseKey` do `/api/extension/session` i pominie logowanie magic link.
 
 ## Kroki przed wydaniem
 
-1. Skopiuj `config.default.json` do `config.json` i ustaw docelowy `proxyBase` (HTTPS) oraz opcjonalnie `upgradeUrl`.
-2. W Google Cloud utworz OAuth Client ID typu *Chrome App* i wklej jego wartosc do `manifest.json` -> `oauth2.client_id`.
-3. Upewnij sie, ze w `manifest.json` wpisany jest zakres `https://www.googleapis.com/auth/userinfo.email` (dodano go domyslnie).
-4. Na backendzie ustaw zmienna `GOOGLE_CLIENT_ID` z ta sama wartoscia, aby proxy moglo weryfikowac tokeny.
-5. Odswiez rozszerzenie (lub zbuduj CRX). Przy pierwszym uzyciu rozszerzenie poprosi uzytkownika o autoryzacje konta Google (`chrome.identity`).
-
-Dzieki temu uzytkownik po instalacji tylko klika "Polacz z Google", a backend rozpoznaje go po koncie Google – bez wpisywania recznych kluczy licencyjnych.
+1. Skopiuj `main.config.default.json` do `main.config.json` i ustaw docelowy `proxyBase` (HTTPS) oraz opcjonalnie `upgradeUrl`.
+2. Ustaw backend do obslugi magic link i wysylki e-maili.
+3. Odswiez rozszerzenie (lub zbuduj CRX). Przy pierwszym uzyciu uzytkownik podaje e-mail w zakladce Opcje i potwierdza logowanie linkiem z maila.

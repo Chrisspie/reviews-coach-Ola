@@ -1,18 +1,17 @@
 const DEFAULT_MODEL = 'gemini-2.0-flash';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
-const GOOGLE_SESSION_ENDPOINT_PATH = '/api/extension/google-session';
+const MAGIC_LINK_ENDPOINT_PATH = '/api/auth/magic-link';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
 const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
 const LOG_PROMPT_PREVIEW_LIMIT = 200;
 const LOG_PROMPT_ELLIPSIS = '...';
 const INSTALL_ID_KEY = 'rcInstallId';
+const DEVICE_TOKEN_KEY = 'rcDeviceToken';
+const ACCOUNT_PROFILE_KEY = 'rcAccountProfile';
 const CONFIG_PRIMARY_FILE = 'config.json';
 const CONFIG_FALLBACK_FILE = 'config.default.json';
 
-const GOOGLE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
-const GOOGLE_PROFILE_KEY = 'rcGoogleProfile';
-const GOOGLE_USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/userinfo';
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
 
 let staticConfigPromise = null;
@@ -48,26 +47,11 @@ async function loadConfigFile(fileName){
   }
   const proxyBase = normalizeBase(parsed.proxyBase || parsed.apiBase);
   const upgradeUrl = (parsed.upgradeUrl || parsed.billingUrl || '').trim();
-  const devSections = [];
-  if (parsed.dev && typeof parsed.dev === 'object'){ devSections.push(parsed.dev); }
-  if (parsed.devMode && typeof parsed.devMode === 'object'){ devSections.push(parsed.devMode); }
-  const devCandidates = [parsed.devMockGoogleEmail, parsed.devGoogleMockEmail, parsed.devGoogleEmail];
-  devSections.forEach(section => {
-    if (section && typeof section === 'object'){
-      devCandidates.push(section.googleMockEmail, section.googleEmail);
-    }
-  });
-  let devMockGoogleEmail = '';
-  for (const candidate of devCandidates){
-    if (typeof candidate === 'string' && candidate.trim()){
-      devMockGoogleEmail = candidate.trim();
-      break;
-    }
-  }
+  const licenseKey = (parsed.licenseKey || '').toString().trim();
   if (!proxyBase){
     throw new Error('Missing proxyBase in config file');
   }
-  return { proxyBase, upgradeUrl, source: fileName, devMockGoogleEmail };
+  return { proxyBase, upgradeUrl, source: fileName, licenseKey };
 }
 
 async function loadStaticConfig(){
@@ -247,92 +231,47 @@ async function ensureInstallId(){
   return generated;
 }
 
-async function getStoredGoogleProfile(){
-  const stored = await chrome.storage.local.get([GOOGLE_PROFILE_KEY]);
-  return stored?.[GOOGLE_PROFILE_KEY] || null;
+async function getStoredAccountProfile(){
+  const stored = await chrome.storage.local.get([ACCOUNT_PROFILE_KEY]);
+  return stored?.[ACCOUNT_PROFILE_KEY] || null;
 }
 
-async function storeGoogleProfile(profile){
+async function storeAccountProfile(profile){
   if (!profile) return;
-  const payload = {}; payload[GOOGLE_PROFILE_KEY] = profile;
+  const payload = {}; payload[ACCOUNT_PROFILE_KEY] = profile;
   await chrome.storage.local.set(payload);
 }
 
-async function clearGoogleProfile(){
-  await chrome.storage.local.remove([GOOGLE_PROFILE_KEY]);
+async function clearAccountProfile(){
+  await chrome.storage.local.remove([ACCOUNT_PROFILE_KEY]);
 }
 
-function identityGetAuthToken(options){
+async function getStoredDeviceToken(){
+  const stored = await chrome.storage.local.get([DEVICE_TOKEN_KEY]);
+  return stored?.[DEVICE_TOKEN_KEY] || '';
+}
+
+async function storeDeviceToken(token){
+  if (!token) return;
+  const payload = {}; payload[DEVICE_TOKEN_KEY] = token;
+  await chrome.storage.local.set(payload);
+}
+
+async function clearStoredDeviceToken(){
+  await chrome.storage.local.remove([DEVICE_TOKEN_KEY]);
+}
+
+function launchAuthFlow(url){
   return new Promise((resolve, reject)=>{
-    chrome.identity.getAuthToken(options, token => {
-      if (chrome.runtime.lastError || !token){
-        const message = chrome.runtime.lastError?.message || 'Token Google nie jest dostepny.';
+    chrome.identity.launchWebAuthFlow({ url, interactive: true }, redirectUri => {
+      if (chrome.runtime.lastError || !redirectUri){
+        const message = chrome.runtime.lastError?.message || 'Auth flow failed.';
         reject(new Error(message));
         return;
       }
-      resolve(token);
+      resolve(redirectUri);
     });
   });
-}
-
-function removeCachedAuthToken(token){
-  return new Promise((resolve)=>{
-    if (!token){ resolve(); return; }
-    chrome.identity.removeCachedAuthToken({ token }, ()=> resolve());
-  });
-}
-
-async function obtainGoogleAccessToken(interactive=false){
-  try {
-    return await identityGetAuthToken({ interactive, scopes: [GOOGLE_OAUTH_SCOPE] });
-  }catch(err){
-    if (!interactive){
-      const authErr = new Error('Musisz polaczyc rozszerzenie z kontem Google (zakladka Opcje).');
-      authErr.code = AUTH_REQUIRED_CODE;
-      throw authErr;
-    }
-    throw err;
-  }
-}
-
-async function fetchGoogleProfile(accessToken){
-  const resp = await fetch(GOOGLE_USERINFO_ENDPOINT, {
-    headers: { 'Authorization': `Bearer ${accessToken}` },
-    cache: 'no-store'
-  });
-  if (!resp.ok){ throw new Error('Nie udalo sie pobrac danych konta Google.'); }
-  const data = await resp.json();
-  return {
-    email: (data.email || '').toString(),
-    sub: (data.sub || '').toString(),
-    name: (data.name || '').toString(),
-    picture: (data.picture || '').toString(),
-    updatedAt: new Date().toISOString()
-  };
-}
-
-async function ensureGoogleIdentity(interactive=false, devMockGoogleEmail=''){
-  const mockEmail = (devMockGoogleEmail || '').trim();
-  if (mockEmail){
-    const profile = {
-      email: mockEmail,
-      sub: mockEmail,
-      name: mockEmail,
-      picture: '',
-      updatedAt: new Date().toISOString()
-    };
-    await storeGoogleProfile(profile);
-    return { accessToken: mockEmail, profile };
-  }
-  const token = await obtainGoogleAccessToken(interactive);
-  let profile = null;
-  try {
-    profile = await fetchGoogleProfile(token);
-    await storeGoogleProfile(profile);
-  } catch (err){
-    console.warn('[RC] Nie udalo sie pobrac profilu Google', err);
-  }
-  return { accessToken: token, profile };
 }
 
 async function clearStoredSession(){
@@ -340,28 +279,35 @@ async function clearStoredSession(){
   await storageArea.remove(['proxySession']);
 }
 
-async function logoutGoogle(){
-  let token = null;
-  try {
-    token = await identityGetAuthToken({ interactive: false, scopes: [GOOGLE_OAUTH_SCOPE] });
-  } catch (_){ token = null; }
-  await removeCachedAuthToken(token);
-  await clearGoogleProfile();
+async function logoutAccount(){
+  await clearStoredDeviceToken();
+  await clearAccountProfile();
   await clearStoredSession();
 }
 
 async function fetchSessionToken(settings, options = {}){
   const proxyBase = settings?.proxyBase;
   if (!proxyBase){ throw new Error('Brak Proxy URL w konfiguracji.'); }
-  const { accessToken: googleToken, profile } = await ensureGoogleIdentity(Boolean(options.interactive), settings?.devMockGoogleEmail || '');
+  const licenseKey = (settings?.licenseKey || '').toString().trim();
+  const deviceToken = licenseKey ? '' : (await getStoredDeviceToken());
   const installId = await ensureInstallId();
-  const tokenUrl = buildProxyUrl(proxyBase, GOOGLE_SESSION_ENDPOINT_PATH);
+  const tokenUrl = buildProxyUrl(proxyBase, SESSION_ENDPOINT_PATH);
   const body = {
-    accessToken: googleToken,
     extensionId: chrome.runtime.id,
     version: chrome.runtime.getManifest().version,
     installId
   };
+  if (licenseKey){
+    body.licenseKey = licenseKey;
+  } else if (options.code){
+    body.code = options.code;
+  } else if (deviceToken){
+    body.deviceToken = deviceToken;
+  } else {
+    const authErr = new Error('Magic link sign-in required. Open Options to connect.');
+    authErr.code = AUTH_REQUIRED_CODE;
+    throw authErr;
+  }
   const headers = {
     'Content-Type': 'application/json',
     'X-Extension-Id': chrome.runtime.id
@@ -390,15 +336,16 @@ async function fetchSessionToken(settings, options = {}){
   const expiresAt = resolveSessionExpiry(parsed);
   const normalizedQuota = normalizeQuota(parsed.quota, settings?.upgradeUrl);
   if (normalizedQuota) updateQuotaState(normalizedQuota);
+  if (parsed.deviceToken){
+    await storeDeviceToken(parsed.deviceToken);
+  }
   if (parsed.profile){
-    await storeGoogleProfile({
-      email: (parsed.profile.email || profile?.email || '').toString(),
-      name: (parsed.profile.name || profile?.name || '').toString(),
-      sub: (parsed.profile.sub || profile?.sub || '').toString(),
+    await storeAccountProfile({
+      email: (parsed.profile.email || '').toString(),
+      sub: (parsed.profile.sub || '').toString(),
+      name: (parsed.profile.name || '').toString(),
       updatedAt: new Date().toISOString()
     });
-  } else if (profile){
-    await storeGoogleProfile(profile);
   }
   const session = { token, proxyBase, expiresAt, quota: normalizedQuota };
   await storeSession(session);
@@ -449,29 +396,94 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
       sendResponse({ quota: getQuotaState() });
       return;
     }
-    if (msg.type === 'GET_GOOGLE_STATUS'){
-      const profile = await getStoredGoogleProfile();
+    if (msg.type === 'GET_AUTH_STATUS'){
+      const profile = await getStoredAccountProfile();
       sendResponse({ profile });
       return;
     }
-    if (msg.type === 'START_GOOGLE_LOGIN'){
+    if (msg.type === 'START_MAGIC_LINK'){
+      const email = (msg.email || '').toString().trim();
+      if (!email){
+        sendResponse({ error: 'Email is required.' });
+        return;
+      }
       try {
         const proxySettings = await getProxySettings();
-        const result = await ensureGoogleIdentity(true, proxySettings?.devMockGoogleEmail || '');
-        await clearStoredSession();
-        sendResponse({ ok: true, profile: result.profile });
+        const installId = await ensureInstallId();
+        const redirectUri = chrome.identity.getRedirectURL('magic-link');
+        const requestBody = {
+          email,
+          installId,
+          extensionId: chrome.runtime.id,
+          redirectUri
+        };
+        const resp = await fetch(buildProxyUrl(proxySettings.proxyBase, MAGIC_LINK_ENDPOINT_PATH), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          mode: 'cors',
+          cache: 'no-store',
+          credentials: 'omit'
+        });
+        const raw = await resp.text();
+        let parsed = {};
+        try { parsed = raw ? JSON.parse(raw) : {}; } catch (_){ parsed = {}; }
+        if (!resp.ok){
+          const message = parsed.error || parsed.message || resp.statusText || 'Magic link request failed.';
+          sendResponse({ error: message });
+          return;
+        }
+        if (parsed.magicLink){
+          const redirectUrl = await launchAuthFlow(parsed.magicLink);
+          const urlObj = new URL(redirectUrl);
+          const code = urlObj.searchParams.get('code');
+          if (!code){
+            sendResponse({ error: 'Missing auth code in redirect.' });
+            return;
+          }
+          await clearStoredSession();
+          await fetchSessionToken(proxySettings, { code });
+          const profile = await getStoredAccountProfile();
+          sendResponse({ ok: true, profile });
+          return;
+        }
+        sendResponse({ ok: true, pending: true, emailSent: parsed.emailSent === true });
       } catch (err){
-        const message = err && err.message ? err.message : 'Nie udalo sie polaczyc z kontem Google.';
+        const message = err && err.message ? err.message : 'Magic link failed.';
         sendResponse({ error: message });
       }
       return;
     }
-    if (msg.type === 'GOOGLE_LOGOUT'){
-      await logoutGoogle();
+    if (msg.type === 'COMPLETE_MAGIC_LINK'){
+      const code = (msg.code || '').toString().trim();
+      if (!code){
+        sendResponse({ error: 'Code is required.' });
+        return;
+      }
+      try {
+        const proxySettings = await getProxySettings();
+        await clearStoredSession();
+        await fetchSessionToken(proxySettings, { code });
+        const profile = await getStoredAccountProfile();
+        sendResponse({ ok: true, profile });
+      } catch (err){
+        const message = err && err.message ? err.message : 'Could not complete sign-in.';
+        sendResponse({ error: message });
+      }
+      return;
+    }
+    if (msg.type === 'LOGOUT'){
+      await logoutAccount();
       sendResponse({ ok: true });
       return;
     }
     if (msg.type === 'GENERATE_ALL'){
+      const payload = (msg && typeof msg === 'object' && msg.payload && typeof msg.payload === 'object') ? msg.payload : null;
+      if (!payload){
+        console.warn('[RC] GENERATE_ALL message missing payload.');
+        sendResponse({ error: 'Brak danych opinii do wygenerowania.' });
+        return;
+      }
       const proxySettings = await getProxySettings();
       if (!proxySettings.proxyBase){ sendResponse({ error:'Brak Proxy URL. Uzupelnij plik config.json.' }); return; }
       let sessionToken = '';
@@ -483,8 +495,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
         sendResponse({ error: message, errorCode: err && err.code ? err.code : undefined });
         return;
       }
-      const rating = msg.payload.rating || '?';
-      const reviewText = (msg.payload.text || '').trim();
+      const ratingRaw = payload.rating == null ? '?' : payload.rating;
+      const rating = (typeof ratingRaw === 'string' ? ratingRaw : String(ratingRaw)).trim() || '?';
+      const reviewText = (payload.text == null ? '' : String(payload.text)).trim();
       console.log('[RC] Worker payload:', { rating, textLength: reviewText.length, sample: reviewText.slice(0, 140) });
       const ratingNumber = parseFloat(rating);
       let toneHint = 'neutralny i uprzejmy';
@@ -494,7 +507,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
           toneHint = 'empatyczny i spokojny, zachecajacy do kontaktu przez profil';
           sentimentGuideline = 'Klient jest niezadowolony: przepros, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.';
         }else if (ratingNumber <= 3.5){
-          toneHint = 'rzeczowy i uprzejmy';
+          toneHint = 'rzeczowy i uprzejmy';0
           sentimentGuideline = 'Klient ma mieszane odczucia: podziekuj, odnie sie do uwag i zapewnij o wsparciu.';
         }else{
           toneHint = 'serdeczny, wdzieczny i krotki';
@@ -629,6 +642,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse)=>{
 });
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeBase, loadConfigFile, ensureGoogleIdentity };
+  module.exports = { normalizeBase, loadConfigFile };
 }
-

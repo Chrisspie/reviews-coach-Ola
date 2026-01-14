@@ -16,6 +16,7 @@
     dd { margin: 4px 0 0; word-break: break-all; }
     button { border: none; border-radius: 999px; padding: 12px 24px; font-size: 15px; font-weight: 600; cursor: pointer; background: #0f172a; color: #fff; }
     button.secondary { background: #e2e8f0; color: #0f172a; }
+    input { border: 1px solid #cbd5f5; border-radius: 12px; padding: 10px 12px; font-size: 14px; min-width: 220px; }
     .hint { margin-top: 24px; padding: 18px 20px; border-radius: 12px; border: 1px dashed #cbd5f5; background: #f8fafc; font-size: 14px; }
     .muted { color: #64748b; font-size: 13px; }
     .status-ok { color: #047857; }
@@ -26,7 +27,7 @@
 <body>
 <main>
   <h1>Bezpieczne proxy Reviews Coach</h1>
-  <p>Ta wersja rozszerzenia laczy sie z proxy po stronie serwera. Plik <code>config.json</code> okresla tylko adres <code>proxyBase</code> oraz (opcjonalny) link do abonamentu. Uwierzytelnienie odbywa sie przez konto Google (API <code>chrome.identity</code>).</p>
+  <p>Ta wersja rozszerzenia laczy sie z proxy po stronie serwera. Plik <code>main.config.json</code> okresla tylko adres <code>proxyBase</code> oraz (opcjonalny) link do abonamentu. Uwierzytelnienie odbywa sie przez magic link na e-mail.</p>
 
   <section class="hint">
     <h2>Biezaca konfiguracja</h2>
@@ -42,17 +43,22 @@
   </section>
 
   <section class="hint">
-    <h2>Konto Google</h2>
+    <h2>Logowanie e-mail (magic link)</h2>
     <p id="auth-status" class="muted">(wczytywanie...)</p>
     <div class="actions">
-      <button id="login_btn">Polacz z Google</button>
+      <input id="email_input" type="email" placeholder="email@firma.pl">
+      <button id="magic_link_btn">Wyslij link</button>
+    </div>
+    <div class="actions">
+      <input id="code_input" type="text" placeholder="Kod z linku (code=...)">
+      <button id="complete_btn" class="secondary">Zakoncz logowanie</button>
       <button id="logout_btn" class="secondary">Wyloguj</button>
     </div>
-    <p class="muted">Po polaczeniu rozszerzenie bedzie pobieralo tokeny przez <code>chrome.identity.getAuthToken</code>. Przy kolejnych uruchomieniach autoryzacja odbywa sie automatycznie.</p>
+    <p class="muted">Po kliknieciu w link w mailu skopiuj parametr <code>code</code> i wklej powyzej, jesli logowanie nie otworzylo sie automatycznie.</p>
   </section>
 
   <div class="hint">
-    <p>Aby zmienic konfiguracje przed publikacja, skopiuj <code>config.default.json</code> do <code>config.json</code>, ustaw docelowy <code>proxyBase</code> i (opcjonalnie) <code>upgradeUrl</code>, a nastepnie przebuduj/odswiez rozszerzenie. Pamietaj tez o uzupelnieniu <code>manifest.json</code> o wlasne <strong>OAuth Client ID</strong> Google (pole <code>oauth2.client_id</code>) oraz zmienna <code>GOOGLE_CLIENT_ID</code> na backendzie.</p>
+    <p>Aby zmienic konfiguracje przed publikacja, skopiuj <code>main.config.default.json</code> do <code>main.config.json</code>, ustaw docelowy <code>proxyBase</code> i (opcjonalnie) <code>upgradeUrl</code>, a nastepnie przebuduj/odswiez rozszerzenie.</p>
   </div>
 </main>
 <script src="options.js"></script>

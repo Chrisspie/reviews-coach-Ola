@@ -333,9 +333,12 @@
     });
   }
 
+  const GENERATE_TIMEOUT_MS = 12000;
+
   panelApi.generateReplies = function generateReplies(panelEl, card, variants, force, reviewSource){
     const preview = panelEl.querySelector('#rc_preview');
     const seg = panelEl.querySelector('#rc_seg');
+    const errorBox = panelEl.querySelector('#rc_err');
     if (!force && variants.soft){
       const active = seg.querySelector('.active')?.dataset.style || 'soft';
       preview.textContent = variants[active] || '...';
@@ -345,6 +348,27 @@
     preview.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuje...</span></div>';
     panelEl.parentElement?.reposition?.();
 
+    const showErrorFallback = (message)=>{
+      if (!panelEl.isConnected) return;
+      if (errorBox) errorBox.textContent = message || 'Blad generowania (sprawdz klucz).';
+      const activeStyle = seg.querySelector('.active')?.dataset.style || 'soft';
+      const fallback = variants[activeStyle] || variants.soft || variants.brief || variants.proactive || '...';
+      preview.textContent = fallback;
+      panelEl.parentElement?.reposition?.();
+    };
+
+    let timeoutId = 0;
+    let settled = false;
+    const settle = ()=>{
+      if (settled) return false;
+      settled = true;
+      if (timeoutId){
+        clearTimeout(timeoutId);
+        timeoutId = 0;
+      }
+      return true;
+    };
+
     const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
     const payload = {
       text: (source.text || '').trim(),
@@ -352,38 +376,60 @@
     };
     console.log('[RC] payload wysylany do SW:', { ...payload });
 
-    chrome.runtime.sendMessage({ type: 'GENERATE_ALL', payload }, (resp)=>{
-      if (!panelEl.isConnected) return;
-      const errorBox = panelEl.querySelector('#rc_err');
-      updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
-      if (!resp || resp.error){
-        let errorMessage = resp?.error || 'Blad generowania (sprawdz klucz).';
-        if (resp?.errorCode === 'FREE_LIMIT_REACHED'){
-          errorMessage = 'Limit darmowych odpowiedzi został wykorzystany.';
-        }
-        errorBox.textContent = errorMessage;
-        if (resp?.errorCode === 'AUTH_REQUIRED'){
-          panelEl.parentElement?.reposition?.();
+    timeoutId = window.setTimeout(()=>{
+      if (!settle() || !panelEl.isConnected) return;
+      console.warn('[RC] GENERATE_ALL timed out (no SW response).');
+      showErrorFallback('Brak odpowiedzi z uslugi generowania. Sprobuj ponownie.');
+    }, GENERATE_TIMEOUT_MS);
+
+    const sendMessage = chrome?.runtime?.sendMessage;
+    if (typeof sendMessage !== 'function'){
+      console.error('[RC] chrome.runtime.sendMessage is not available.');
+      settle();
+      showErrorFallback('Brak komunikacji z usluga generowania.');
+      return;
+    }
+
+    try {
+      sendMessage({ type: 'GENERATE_ALL', payload }, (resp)=>{
+        if (!settle() || !panelEl.isConnected) return;
+        const runtimeError = chrome?.runtime?.lastError || null;
+        if (runtimeError){
+          console.error('[RC] Runtime message error', runtimeError);
+          showErrorFallback(runtimeError.message || 'Blad komunikacji z generowaniem.');
           return;
         }
-        if (resp?.errorCode === 'FREE_LIMIT_REACHED' && resp?.upgradeUrl){
-          const quota = resp?.quota || { limit: resp.freeLimit || 0, remaining: 0, upgradeUrl: resp.upgradeUrl };
-          updateQuotaInfo(panelEl, quota);
+        updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
+        if (!resp || resp.error){
+          let errorMessage = resp?.error || 'Blad generowania (sprawdz klucz).';
+          if (resp?.errorCode === 'FREE_LIMIT_REACHED'){
+            errorMessage = 'Limit darmowych odpowiedzi został wykorzystany.';
+          }
+          if (resp?.errorCode === 'AUTH_REQUIRED'){
+            if (errorBox) errorBox.textContent = errorMessage;
+            panelEl.parentElement?.reposition?.();
+            return;
+          }
+          if (resp?.errorCode === 'FREE_LIMIT_REACHED' && resp?.upgradeUrl){
+            const quota = resp?.quota || { limit: resp.freeLimit || 0, remaining: 0, upgradeUrl: resp.upgradeUrl };
+            updateQuotaInfo(panelEl, quota);
+          }
+          showErrorFallback(errorMessage);
+          return;
         }
-        const activeStyle = seg.querySelector('.active')?.dataset.style || 'soft';
-        const fallback = variants[activeStyle] || variants.soft || variants.brief || variants.proactive || '...';
-        preview.textContent = fallback;
+        variants.soft = resp.soft || '';
+        variants.brief = resp.brief || '';
+        variants.proactive = resp.proactive || '';
+        const active = seg.querySelector('.active')?.dataset.style || 'soft';
+        preview.textContent = variants[active] || '...';
+        if (errorBox) errorBox.textContent = '';
         panelEl.parentElement?.reposition?.();
-        return;
-      }
-      variants.soft = resp.soft || '';
-      variants.brief = resp.brief || '';
-      variants.proactive = resp.proactive || '';
-      const active = seg.querySelector('.active')?.dataset.style || 'soft';
-      preview.textContent = variants[active] || '...';
-      errorBox.textContent = '';
-      panelEl.parentElement?.reposition?.();
-    });
+      });
+    } catch (err){
+      console.error('[RC] Failed to send GENERATE_ALL message', err);
+      settle();
+      showErrorFallback('Nie udalo sie wyslac zadania generowania.');
+    }
   };
 
   panelApi.copyToClipboard = async function copyToClipboard(text){

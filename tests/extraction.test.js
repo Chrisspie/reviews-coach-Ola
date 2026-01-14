@@ -1,4 +1,3 @@
-const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -47,93 +46,65 @@ function withDom(html, fn){
   }
 }
 
-const tests = [
-  {
-    name: 'extractText prefers review text over extension UI',
-    run(){
-      withDom(`
-        <div id="card" data-review-id="1">
-          <div class="ODSEW-ShBeI-text">Swietna obsluga!</div>
-          <button class="rc-chip-btn"><span>Podpowiedz odpowiedz</span></button>
-        </div>
-        <div id="rc_root"></div>
-      `, ({ extractText, dom }) => {
-        const card = dom.window.document.getElementById('card');
-        const result = extractText(card);
-        assert.strictEqual(result, 'Swietna obsluga!');
-      });
-    }
-  },
-  {
-    name: 'extractText falls back to longest meaningful chunk',
-    run(){
-      withDom(`
-        <div id="card">
-          <div class="rc-chip-btn">Podpowiedz odpowiedz</div>
-          <p>Ok</p>
-        </div>
-      `, ({ extractText, dom }) => {
-        const card = dom.window.document.getElementById('card');
-        const result = extractText(card);
-        assert.strictEqual(result, 'Ok');
-      });
-    }
-  },
-  {
-    name: 'extractRating reads value from aria-label',
-    run(){
-      withDom(`
-        <div id="card">
-          <div aria-label="Ocena 4,5 na 5"><span>?????</span></div>
-        </div>
-      `, ({ extractRating, dom }) => {
-        const card = dom.window.document.getElementById('card');
-        const result = extractRating(card);
-        assert.strictEqual(result, '4.5');
-      });
-    }
-  },
-  {
-    name: 'extractRating reads data-rating attributes',
-    run(){
-      withDom(`
-        <div id="card">
-          <div data-rating="3.0"></div>
-        </div>
-      `, ({ extractRating, dom }) => {
-        const card = dom.window.document.getElementById('card');
-        const result = extractRating(card);
-        assert.strictEqual(result, '3');
-      });
-    }
-  },
-  {
-    name: 'extractRating falls back to inline text patterns',
-    run(){
-      withDom(`
-        <div id="card">Ocena klienta: 2 / 5</div>
-      `, ({ extractRating, dom }) => {
-        const card = dom.window.document.getElementById('card');
-        const result = extractRating(card);
-        assert.strictEqual(result, '2');
-      });
-    }
-  }
-];
+describe('Extraction Logic', () => {
+  test('extractText prefers review text over extension UI', () => {
+    withDom(`
+      <div id="card" data-review-id="1">
+        <div class="ODSEW-ShBeI-text">Swietna obsluga!</div>
+        <button class="rc-chip-btn"><span>Podpowiedz odpowiedz</span></button>
+      </div>
+      <div id="rc_root"></div>
+    `, ({ extractText, dom }) => {
+      const card = dom.window.document.getElementById('card');
+      const result = extractText(card);
+      expect(result).toBe('Swietna obsluga!');
+    });
+  });
 
-let passed = 0;
-for (const test of tests){
-  try {
-    test.run();
-    console.log(`[ok] ${test.name}`);
-    passed++;
-  } catch (err){
-    console.error(`[fail] ${test.name}`);
-    console.error(err);
-    process.exitCode = 1;
-    break;
-  }
-}
-if (process.exitCode !== 1){
-  console.log(`All ${passed} tests passed.`);
-}
+  test('extractText falls back to longest meaningful chunk', () => {
+    withDom(`
+      <div id="card">
+        <div class="rc-chip-btn">Podpowiedz odpowiedz</div>
+        <p>Ok</p>
+      </div>
+    `, ({ extractText, dom }) => {
+      const card = dom.window.document.getElementById('card');
+      const result = extractText(card);
+      expect(result).toBe('Ok');
+    });
+  });
+
+  test('extractRating reads value from aria-label', () => {
+    withDom(`
+      <div id="card">
+        <div aria-label="Ocena 4,5 na 5"><span>?????</span></div>
+      </div>
+    `, ({ extractRating, dom }) => {
+      const card = dom.window.document.getElementById('card');
+      const result = extractRating(card);
+      expect(result).toBe('4.5');
+    });
+  });
+
+  test('extractRating reads data-rating attributes', () => {
+    withDom(`
+      <div id="card">
+        <div data-rating="3.0"></div>
+      </div>
+    `, ({ extractRating, dom }) => {
+      const card = dom.window.document.getElementById('card');
+      const result = extractRating(card);
+      expect(result).toBe('3');
+    });
+  });
+
+  test('extractRating falls back to inline text patterns', () => {
+    withDom(`
+      <div id="card">Ocena klienta: 2 / 5</div>
+    `, ({ extractRating, dom }) => {
+      const card = dom.window.document.getElementById('card');
+      const result = extractRating(card);
+      expect(result).toBe('2');
+    });
+  });
+});

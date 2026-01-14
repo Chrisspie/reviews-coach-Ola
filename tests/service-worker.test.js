@@ -1,4 +1,3 @@
-const assert = require('node:assert/strict');
 const { webcrypto } = require('node:crypto');
 
 function createStorageArea() {
@@ -25,7 +24,9 @@ function createStorageArea() {
   };
 }
 
-global.crypto = webcrypto;
+let onMessageHandler = null;
+
+// global.crypto = webcrypto;
 const sessionArea = createStorageArea();
 const localArea = createStorageArea();
 
@@ -35,7 +36,7 @@ global.chrome = {
     lastError: null,
     getURL: fileName => fileName,
     getManifest: () => ({ version: '1.0.0' }),
-    onMessage: { addListener: () => {} }
+    onMessage: { addListener: (fn) => { onMessageHandler = fn; } }
   },
   storage: {
     session: sessionArea,
@@ -50,47 +51,36 @@ global.chrome = {
 global.fetch = async () => { throw new Error('fetch not mocked'); };
 
 const worker = require('../service_worker.js');
-const { normalizeBase, loadConfigFile, ensureGoogleIdentity } = worker;
+const { normalizeBase, loadConfigFile } = worker;
 
-async function runTest(name, fn) {
-  try {
-    await fn();
-    console.log('[ok]', name);
-  } catch (err) {
-    console.error('[fail]', name);
-    console.error(err);
-    process.exit(1);
-  }
-}
-
-(async () => {
-  await runTest('normalizeBase trims trailing slashes', async () => {
-    assert.equal(normalizeBase('https://example.com///'), 'https://example.com');
-    assert.equal(normalizeBase('https://api.test/path/'), 'https://api.test/path');
+describe('Service Worker Logic', () => {
+  test('normalizeBase trims trailing slashes', () => {
+    expect(normalizeBase('https://example.com///')).toBe('https://example.com');
+    expect(normalizeBase('https://api.test/path/')).toBe('https://api.test/path');
   });
 
-  await runTest('loadConfigFile reads proxy base and dev email', async () => {
+  test('loadConfigFile reads proxy base and license key', async () => {
     global.fetch = async () => ({
       ok: true,
       text: async () => JSON.stringify({
         proxyBase: 'https://proxy.local/ ',
-        dev: { googleMockEmail: 'dev@test.local' }
+        licenseKey: 'TEST-LICENSE'
       })
     });
     const cfg = await loadConfigFile('config.json');
-    assert.equal(cfg.proxyBase, 'https://proxy.local');
-    assert.equal(cfg.devMockGoogleEmail, 'dev@test.local');
-    assert.equal(cfg.source, 'config.json');
+    expect(cfg.proxyBase).toBe('https://proxy.local');
+    expect(cfg.licenseKey).toBe('TEST-LICENSE');
+    expect(cfg.source).toBe('config.json');
   });
 
-  await runTest('ensureGoogleIdentity returns mocked profile when email provided', async () => {
-    const result = await ensureGoogleIdentity(false, 'mock-user@test.local');
-    assert.equal(result.accessToken, 'mock-user@test.local');
-    assert.equal(result.profile.email, 'mock-user@test.local');
-    const stored = await localArea.get('rcGoogleProfile');
-    assert.ok(stored.rcGoogleProfile);
-    assert.equal(stored.rcGoogleProfile.email, 'mock-user@test.local');
+  test('GENERATE_ALL without payload responds with error', async () => {
+    expect(typeof onMessageHandler).toBe('function');
+    let response = null;
+    const listenerResult = onMessageHandler({ type: 'GENERATE_ALL' }, {}, (payload)=>{
+      response = payload;
+    });
+    expect(listenerResult).toBe(true);
+    await Promise.resolve();
+    expect(response).toEqual({ error: 'Brak danych opinii do wygenerowania.' });
   });
-
-  console.log('service-worker.test.js passed');
-})();
+});

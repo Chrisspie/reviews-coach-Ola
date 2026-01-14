@@ -1,5 +1,6 @@
 {
     "proxyBase": "http://localhost:3000",
+    "proxyBase1": "https://reviewscoach.azurewebsites.net",
     "upgradeUrl": "https://twojadomena.com/abonament",
-    "devMockGoogleEmail": ""
+    "licenseKey": ""
 }
