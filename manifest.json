@@ -3,7 +3,12 @@
   "name": "Reviews Coach - Google Reviews Reply Helper",
   "version": "1.2.1",
   "description": "Robustly extracts Google review text + rating and generates reply variants via Gemini. Includes debug logs.",
-  "permissions": ["activeTab", "scripting", "storage", "identity"],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "identity"
+  ],
   "host_permissions": [
     "https://*.google.com/maps/*",
     "https://*.google.pl/maps/*",
@@ -27,22 +32,28 @@
         "content/scan.js",
         "content/index.js"
       ],
-      "css": ["styles.css"],
+      "css": [
+        "styles.css"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "background": { "service_worker": "service_worker.js" },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
   "action": {},
   "options_page": "options.html",
   "oauth2": {
-    "client_id": "REPLACE_WITH_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "519901113833-gol3md6v7uh2rs2rgg87ctmk5j1ruclv.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/userinfo.email"
     ]
   },
   "web_accessible_resources": [
     {
-      "resources": ["styles.css"],
+      "resources": [
+        "styles.css"
+      ],
       "matches": [
         "*://*.google.com/*",
         "*://*.google.pl/*",
