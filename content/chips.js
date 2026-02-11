@@ -191,7 +191,8 @@
     const btn = document.createElement('button');
     btn.className = 'rc-chip-btn';
     btn.setAttribute('data-rc-hash', hashVal);
-    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3l1.6 3.7L17 8.2l-3.4 1.5L12 13l-1.6-3.3L7 8.2l3.4-1.5L12 3z" stroke="currentColor" stroke-width="1.6"/></svg><span>Podpowiedz odpowiedz</span>';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3l1.6 3.7L17 8.2l-3.4 1.5L12 13l-1.6-3.3L7 8.2l3.4-1.5L12 3z" stroke="currentColor" stroke-width="1.6"/></svg><span>Podpowiedz odpowiedź</span>';
+    btn.setAttribute('aria-label', 'Podpowiedz odpowiedź');
     btn.addEventListener('click', onChipClick);
     return btn;
   };
@@ -204,6 +205,8 @@
       const btn = entry.button;
       if (!btn) return;
       if (entry.restacking) return;
+      // Avoid shuffling while user hovers/clicks to prevent flicker and lost clicks
+      if (btn.matches(':hover') || document.activeElement === btn) return;
 
       const buttonInCard = card.contains(btn);
       const slot = entry.slot;
