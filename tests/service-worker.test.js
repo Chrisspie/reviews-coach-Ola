@@ -105,7 +105,13 @@ describe('Service Worker Logic', () => {
   });
 
   test('fetchWithTimeout rejects with a controlled timeout message', async () => {
-    global.fetch = async () => new Promise(() => {});
+    global.fetch = async (_url, init = {}) => new Promise((_, reject) => {
+      init.signal?.addEventListener('abort', () => {
+        const error = new Error('AbortError');
+        error.name = 'AbortError';
+        reject(error);
+      });
+    });
     await expect(fetchWithTimeout(
       'https://proxy.local/gemini/generate',
       { method: 'POST' },
@@ -214,5 +220,169 @@ describe('Service Worker Logic', () => {
     });
     const stored = await localArea.get(['rcDeviceToken']);
     expect(stored.rcDeviceToken).toBe('fresh-device-token');
+  });
+
+  test('GENERATE_ALL builds the updated Polish prompt for a positive review', async () => {
+    let generateBody = null;
+    let response = null;
+    let resolveGenerateRequest;
+    let resolveResponse;
+    const generateRequestSeen = new Promise(resolve => { resolveGenerateRequest = resolve; });
+    const responseSeen = new Promise(resolve => { resolveResponse = resolve; });
+
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json' || url === 'config.default.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        generateBody = JSON.parse(options.body || '{}');
+        resolveGenerateRequest();
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: () => null
+          },
+          text: async () => JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: '{"soft":"soft reply","brief":"brief reply","proactive":"proactive reply"}'
+                    }
+                  ]
+                }
+              }
+            ]
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: { rating: '5', text: 'Świetna obsługa i pyszne pierogi.' }
+    }, {}, (payload) => {
+      response = payload;
+      resolveResponse();
+    });
+
+    expect(listenerResult).toBe(true);
+    await generateRequestSeen;
+    await responseSeen;
+
+    const prompt = generateBody.contents[0].parts[0].text;
+
+    expect(prompt).toContain('Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.');
+    expect(prompt).toContain('Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.');
+    expect(prompt).toContain('Zwróć tylko poprawny JSON bez dodatkowych komentarzy.');
+    expect(prompt).toContain('Dziękujemy za opinię,');
+    expect(prompt).toContain('Ocena klienta: 5/5.');
+    expect(prompt).toContain('Klient jest zadowolony: podziękuj, podkreśl docenione elementy i zaproś do ponownej wizyty.');
+    expect(prompt).toContain('Dostosuj ogólny ton: serdeczny, wdzięczny i krótki');
+    expect(prompt).toContain('Treść opinii:\nŚwietna obsługa i pyszne pierogi.');
+    expect(prompt).not.toContain('Dzień dobry');
+    expect(prompt).not.toContain('Dzien dobry');
+    expect(response._prompt).toBe(prompt);
+  });
+
+  test('GENERATE_ALL builds the updated Polish prompt for a negative review', async () => {
+    let generateBody = null;
+    let resolveGenerateRequest;
+    const generateRequestSeen = new Promise(resolve => { resolveGenerateRequest = resolve; });
+
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json' || url === 'config.default.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        generateBody = JSON.parse(options.body || '{}');
+        resolveGenerateRequest();
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: () => null
+          },
+          text: async () => JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: '{"soft":"soft reply","brief":"brief reply","proactive":"proactive reply"}'
+                    }
+                  ]
+                }
+              }
+            ]
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: { rating: '1', text: 'Jedzenie było zimne i długo czekaliśmy.' }
+    }, {}, () => {});
+
+    expect(listenerResult).toBe(true);
+    await generateRequestSeen;
+
+    const prompt = generateBody.contents[0].parts[0].text;
+
+    expect(prompt).toContain('Ocena klienta: 1/5.');
+    expect(prompt).toContain('Klient jest niezadowolony: przeproś, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.');
+    expect(prompt).toContain('Dostosuj ogólny ton: empatyczny i spokojny, zachęcający do kontaktu przez profil');
+    expect(prompt).toContain('Jeśli opinia zawiera problem, w każdym wariancie okaż zrozumienie i odnieś się do problemu.');
+    expect(prompt).toContain('Jedzenie było zimne i długo czekaliśmy.');
+    expect(prompt).toContain('Zapraszamy do kontaktu przez dane dostępne na profilu firmy.');
   });
 });
