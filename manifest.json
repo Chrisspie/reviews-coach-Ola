@@ -4,24 +4,18 @@
   "version": "1.2.1",
   "description": "Robustly extracts Google review text + rating and generates reply variants via Gemini. Includes debug logs.",
   "permissions": [
-    "activeTab",
-    "scripting",
     "storage",
     "identity"
   ],
   "host_permissions": [
     "https://*.google.com/maps/*",
-    "https://*.google.pl/maps/*",
-    "https://business.google.com/*",
-    "https://business.google.pl/*"
+    "https://*.google.pl/maps/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "https://*.google.com/maps/*",
-        "https://*.google.pl/maps/*",
-        "https://business.google.com/*",
-        "https://business.google.pl/*"
+        "https://*.google.pl/maps/*"
       ],
       "js": [
         "content/namespace.js",
@@ -55,10 +49,8 @@
         "styles.css"
       ],
       "matches": [
-        "*://*.google.com/*",
-        "*://*.google.pl/*",
-        "*://business.google.com/*",
-        "*://business.google.pl/*"
+        "https://*.google.com/*",
+        "https://*.google.pl/*"
       ]
     }
   ]

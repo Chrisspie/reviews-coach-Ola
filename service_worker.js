@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
 const MAGIC_LINK_ENDPOINT_PATH = '/api/auth/magic-link';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
@@ -6,6 +6,14 @@ const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
 const LOG_PROMPT_PREVIEW_LIMIT = 200;
 const LOG_PROMPT_ELLIPSIS = '...';
+const GENERATE_REQUEST_TIMEOUT_MS = 18 * 1000;
+const GENERATE_TIMEOUT_MESSAGE = 'Usluga generowania odpowiada zbyt wolno. Sprobuj ponownie.';
+const MAX_REVIEW_TEXT_CHARS = 1500;
+const DEFAULT_GENERATION_CONFIG = {
+  candidateCount: 1,
+  temperature: 0.5,
+  maxOutputTokens: 320
+};
 const INSTALL_ID_KEY = 'rcInstallId';
 const DEVICE_TOKEN_KEY = 'rcDeviceToken';
 const ACCOUNT_PROFILE_KEY = 'rcAccountProfile';
@@ -13,6 +21,7 @@ const CONFIG_PRIMARY_FILE = 'config.json';
 const CONFIG_FALLBACK_FILE = 'config.default.json';
 
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
+const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez magic link.';
 
 let staticConfigPromise = null;
 let quotaState = null;
@@ -22,6 +31,12 @@ function truncateForLog(value, maxLen = LOG_PROMPT_PREVIEW_LIMIT) {
   if (str.length <= maxLen) return str;
   const sliceLen = Math.max(0, maxLen - LOG_PROMPT_ELLIPSIS.length);
   return str.slice(0, sliceLen) + LOG_PROMPT_ELLIPSIS;
+}
+
+function truncateReviewText(value, maxLen = MAX_REVIEW_TEXT_CHARS) {
+  const str = (value || '').toString().trim();
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen).trimEnd() + '...';
 }
 
 function getProxySessionStorage() {
@@ -85,6 +100,29 @@ function buildProxyUrl(base, path) {
   if (!base) return '';
   const suffix = path || '';
   return base + suffix;
+}
+
+async function fetchWithTimeout(url, init, timeoutMs, timeoutMessage) {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return fetch(url, init);
+  }
+  const controller = new AbortController();
+  const timerId = setTimeout(() => {
+    controller.abort(new Error(timeoutMessage || 'Request timed out.'));
+  }, timeoutMs);
+  try {
+    return await fetch(url, {
+      ...(init || {}),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err && (err.name === 'AbortError' || String(err).includes('AbortError'))) {
+      throw new Error(timeoutMessage || 'Request timed out.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timerId);
+  }
 }
 
 async function getCachedSession() {
@@ -275,6 +313,43 @@ function launchAuthFlow(url) {
   });
 }
 
+function isInvalidDeviceTokenError(err) {
+  const message = err && err.message ? String(err.message) : '';
+  return message.toLowerCase().includes('invalid device token');
+}
+
+async function requestGoogleIdToken(proxySettings) {
+  const clientId = (proxySettings?.googleClientId || '').toString().trim();
+  if (!clientId) {
+    throw new Error('Brak Google Client ID w konfiguracji.');
+  }
+  const redirectUri = chrome.identity.getRedirectURL('provider_cb');
+  console.log('[RC] OAuth Redirect URI (add this to Google Cloud Console):', redirectUri);
+  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  authUrl.searchParams.set('client_id', clientId);
+  authUrl.searchParams.set('response_type', 'id_token');
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('scope', 'email profile openid');
+  authUrl.searchParams.set('nonce', Math.random().toString(36).substring(2));
+  authUrl.searchParams.set('prompt', 'select_account');
+
+  const responseUrl = await launchAuthFlow(authUrl.toString());
+  if (!responseUrl) {
+    throw new Error('Logowanie anulowane.');
+  }
+  const urlObj = new URL(responseUrl);
+  const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+  const hashToken = hashParams.get('id_token');
+  if (hashToken) {
+    return hashToken;
+  }
+  const queryToken = urlObj.searchParams.get('id_token');
+  if (queryToken) {
+    return queryToken;
+  }
+  throw new Error('Brak id_token w odpowiedzi Google.');
+}
+
 async function clearStoredSession() {
   const storageArea = getProxySessionStorage();
   await storageArea.remove(['proxySession']);
@@ -284,6 +359,12 @@ async function logoutAccount() {
   await clearStoredDeviceToken();
   await clearAccountProfile();
   await clearStoredSession();
+}
+
+function createAuthRequiredError(message = AUTH_REQUIRED_MESSAGE) {
+  const err = new Error(message);
+  err.code = AUTH_REQUIRED_CODE;
+  return err;
 }
 
 async function fetchSessionToken(settings, options = {}) {
@@ -307,36 +388,8 @@ async function fetchSessionToken(settings, options = {}) {
   } else if (deviceToken) {
     body.deviceToken = deviceToken;
   } else {
-    // No auth available - try to trigger Google login automatically
-    console.log('[RC] No auth method available, attempting auto Google login...');
-    const googleClientId = settings?.googleClientId;
-    if (googleClientId) {
-      const redirectUri = chrome.identity.getRedirectURL('provider_cb');
-      const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      authUrl.searchParams.set('client_id', googleClientId);
-      authUrl.searchParams.set('response_type', 'id_token');
-      authUrl.searchParams.set('redirect_uri', redirectUri);
-      authUrl.searchParams.set('scope', 'email profile openid');
-      authUrl.searchParams.set('nonce', Math.random().toString(36).substring(2));
-      authUrl.searchParams.set('prompt', 'select_account');
-
-      const responseUrl = await launchAuthFlow(authUrl.toString());
-      if (!responseUrl) {
-        throw new Error('Logowanie anulowane.');
-      }
-      const urlObj = new URL(responseUrl);
-      const params = new URLSearchParams(urlObj.hash.substring(1));
-      const autoIdToken = params.get('id_token');
-      if (!autoIdToken) {
-        throw new Error('Brak id_token w odpowiedzi Google.');
-      }
-      body.idToken = autoIdToken;
-      console.log('[RC] Auto Google login successful, proceeding with idToken');
-    } else {
-      const authErr = new Error('Sign-in required. Please configure Google Client ID or license key.');
-      authErr.code = AUTH_REQUIRED_CODE;
-      throw authErr;
-    }
+    console.warn('[RC] No auth method available. User must sign in via magic link.');
+    throw createAuthRequiredError();
   }
   const headers = {
     'Content-Type': 'application/json',
@@ -388,7 +441,30 @@ async function ensureSessionToken(settings, options = {}) {
     if (cached.quota) updateQuotaState(cached.quota);
     return cached.token;
   }
-  const session = await fetchSessionToken(settings, options);
+  let session;
+  try {
+    session = await fetchSessionToken(settings, options);
+  } catch (err) {
+    if (!isInvalidDeviceTokenError(err)) {
+      throw err;
+    }
+
+    console.warn('[RC] Stored device token rejected by proxy, clearing local auth state.');
+    await clearStoredDeviceToken();
+    await clearStoredSession();
+
+    const canRetryWithGoogle = options.interactive === true
+      && !options.idToken
+      && !options.code
+      && !(settings?.licenseKey || '').toString().trim();
+
+    if (!canRetryWithGoogle) {
+      throw createAuthRequiredError('Sesja wygasla. Zaloguj sie ponownie.');
+    }
+
+    const idToken = await requestGoogleIdToken(settings);
+    session = await fetchSessionToken(settings, { idToken });
+  }
   return session.token;
 }
 function proxyErrorText(j) {
@@ -434,42 +510,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'START_GOOGLE_LOGIN') {
       try {
         const proxySettings = await getProxySettings();
-        const clientId = proxySettings.googleClientId;
-        if (!clientId) {
-          sendResponse({ error: 'Brak Google Client ID w konfiguracji.' });
-          return;
-        }
-        const redirectUri = chrome.identity.getRedirectURL('provider_cb');
-        console.log('[RC] OAuth Redirect URI (add this to Google Cloud Console):', redirectUri);
-        const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-        authUrl.searchParams.set('client_id', clientId);
-        authUrl.searchParams.set('response_type', 'id_token');
-        authUrl.searchParams.set('redirect_uri', redirectUri);
-        authUrl.searchParams.set('scope', 'email profile openid');
-        authUrl.searchParams.set('nonce', Math.random().toString(36).substring(2));
-        authUrl.searchParams.set('prompt', 'select_account');
-
-        const responseUrl = await launchAuthFlow(authUrl.toString());
-        if (!responseUrl) {
-          sendResponse({ error: 'Logowanie anulowane.' });
-          return;
-        }
-        const urlObj = new URL(responseUrl);
-        const params = new URLSearchParams(urlObj.hash.substring(1)); // id_token is in hash
-        const idToken = params.get('id_token');
-        if (!idToken) {
-          // Sometimes it might come in search query if response_type=code, but for id_token it is usually hash
-          const queryParams = urlObj.searchParams;
-          if (queryParams.get('id_token')) {
-            await clearStoredSession();
-            await fetchSessionToken(proxySettings, { idToken: queryParams.get('id_token') });
-            const profile = await getStoredAccountProfile();
-            sendResponse({ ok: true, profile });
-            return;
-          }
-          sendResponse({ error: 'Brak id_token w odpowiedzi Google.' });
-          return;
-        }
+        const idToken = await requestGoogleIdToken(proxySettings);
+        await clearStoredDeviceToken();
         await clearStoredSession();
         await fetchSessionToken(proxySettings, { idToken });
         const profile = await getStoredAccountProfile();
@@ -492,52 +534,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return;
           }
 
-          // Check if user is logged in with Google (has account profile)
-          const accountProfile = await getStoredAccountProfile();
-          console.log('[RC] OPEN_UPGRADE_PAGE - accountProfile:', accountProfile); // DEBUG
-
-          if (!accountProfile || !accountProfile.email) {
-            // User not logged in with Google - trigger Google login first
-            console.log('[RC] OPEN_UPGRADE_PAGE - No Google account, triggering login first'); // DEBUG
-
-            const clientId = proxySettings.googleClientId;
-            if (!clientId) {
-              sendResponse({ error: 'Brak Google Client ID w konfiguracji.' });
-              return;
-            }
-            const redirectUri = chrome.identity.getRedirectURL('provider_cb');
-            const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-            authUrl.searchParams.set('client_id', clientId);
-            authUrl.searchParams.set('response_type', 'id_token');
-            authUrl.searchParams.set('redirect_uri', redirectUri);
-            authUrl.searchParams.set('scope', 'email profile openid');
-            authUrl.searchParams.set('nonce', Math.random().toString(36).substring(2));
-            authUrl.searchParams.set('prompt', 'select_account');
-
-            try {
-              const responseUrl = await launchAuthFlow(authUrl.toString());
-              if (!responseUrl) {
-                sendResponse({ error: 'Logowanie anulowane.' });
-                return;
-              }
-              const urlObj = new URL(responseUrl);
-              const params = new URLSearchParams(urlObj.hash.substring(1));
-              const idToken = params.get('id_token');
-              if (!idToken) {
-                sendResponse({ error: 'Brak id_token w odpowiedzi Google.' });
-                return;
-              }
-              await clearStoredSession();
-              await fetchSessionToken(proxySettings, { idToken });
-              console.log('[RC] OPEN_UPGRADE_PAGE - Google login successful, now getting session'); // DEBUG
-            } catch (loginErr) {
-              console.error('[RC] OPEN_UPGRADE_PAGE - Google login failed:', loginErr);
-              sendResponse({ error: loginErr.message || 'Blad logowania Google.' });
-              return;
-            }
-          }
-
-          // Now get the session (should be user-based after Google login)
+          // Attach a valid extension session if the user is already signed in.
           const session = await getCachedSession();
           console.log('[RC] OPEN_UPGRADE_PAGE - session after login check:', session); // DEBUG
 
@@ -656,46 +653,88 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const ratingRaw = payload.rating == null ? '?' : payload.rating;
       const rating = (typeof ratingRaw === 'string' ? ratingRaw : String(ratingRaw)).trim() || '?';
-      const reviewText = (payload.text == null ? '' : String(payload.text)).trim();
+      const reviewText = truncateReviewText(payload.text == null ? '' : String(payload.text));
       console.log('[RC] Worker payload:', { rating, textLength: reviewText.length, sample: reviewText.slice(0, 140) });
       const ratingNumber = parseFloat(rating);
       let toneHint = 'neutralny i uprzejmy';
-      let sentimentGuideline = 'Brak oceny: zachowaj neutralnosc i zaproponuj pomoc, jesli klient opisuje problem.';
+      let sentimentGuideline = 'Brak oceny: zachowaj neutralność i zaproponuj pomoc, jeśli klient opisuje problem.';
       if (!Number.isNaN(ratingNumber)) {
         if (ratingNumber <= 2) {
-          toneHint = 'empatyczny i spokojny, zachecajacy do kontaktu przez profil';
-          sentimentGuideline = 'Klient jest niezadowolony: przepros, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.';
+          toneHint = 'empatyczny i spokojny, zachęcający do kontaktu przez profil';
+          sentimentGuideline = 'Klient jest niezadowolony: przeproś, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.';
         } else if (ratingNumber <= 3.5) {
-          toneHint = 'rzeczowy i uprzejmy'; 0
-          sentimentGuideline = 'Klient ma mieszane odczucia: podziekuj, odnie sie do uwag i zapewnij o wsparciu.';
+          toneHint = 'rzeczowy i uprzejmy';
+          sentimentGuideline = 'Klient ma mieszane odczucia: podziękuj, odnieś się do uwag i zapewnij o wsparciu.';
         } else {
-          toneHint = 'serdeczny, wdzieczny i krotki';
-          sentimentGuideline = 'Klient jest zadowolony: podziekuj, podkresl docenione elementy i zapros do ponownej wizyty.';
+          toneHint = 'serdeczny, wdzięczny i krótki';
+          sentimentGuideline = 'Klient jest zadowolony: podziękuj, podkreśl docenione elementy i zaproś do ponownej wizyty.';
         }
       }
       const ratingInfo = (rating && rating !== '?') ? 'Ocena klienta: ' + rating + '/5.' : 'Ocena klienta: brak danych.';
-      const systemPrompt = [
-        'Jestes asystentem firmy, ktory odpowiada na opinie klientow w Google. Jezyk: polski.',
-        'Nie podawaj adresow e-mail ani numerow telefonow. Gdy trzeba, zapros do kontaktu przez informacje na profilu firmy.',
-        'Unikaj frazy "Pan/Pani". Jezeli imie recenzenta jednoznacznie wskazuje plec, uzyj poprawnej formy w wolaczu (np. "Pani Katarzyno", "Panie Piotrze"); w przeciwnym razie zastosuj neutralne powitanie (np. "Dzien dobry").',
-        'Kazda odpowiedz musi nawiazywac do konkretnego elementu opinii (cytat lub krotka parafraza) i adekwatnie reagowac na emocje autora.',
-        'Dostosuj ogolny ton (wg oceny): ' + toneHint + '.',
-        'Dlugosc kazdego wariantu: 2-4 zdania.'
-      ].join('\n');
-      const userPrompt = [
-        ratingInfo,
-        'Tresc opinii:',
-        reviewText,
-        'Wygeneruj poprawny JSON: {"soft":"...","brief":"...","proactive":"..."}. Zwroc tylko JSON bez dodatkowych komentarzy.',
-        'soft: bardzo serdeczny, wdzieczny i uspokajajacy; podkresl wdziecznosc i okaz empatie.',
-        'brief: rzeczowy i konkretny, maksymalnie dwa zdania, bez marketingowych ozdobnikow.',
-        'proactive: proaktywny i konkretny, zaproponuj kolejny krok lub kontakt poprzez profil firmy i podaj powod.',
-        'Kazdy wariant ma uzywac innego slowictwa i konstrukcji zdan, zachowujac zgodnosc z typem.',
-        sentimentGuideline,
-        'Jesli klient sygnalizuje problem, w kazdym wariancie zaproponuj pomoc lub dzialanie naprawcze.',
-        'Oddaj tylko JSON.'
-      ].join('\n');
-      const promptPayload = systemPrompt + '\n\n' + userPrompt;
+      const systemPrompt = `Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.
+
+Zadanie:
+Na podstawie opinii klienta wygeneruj 3 różne odpowiedzi w formacie JSON:
+{"soft":"...","brief":"...","proactive":"..."}
+
+Zasady ogólne:
+- Pisz naturalnie, uprzejmie i po ludzku, jak obsługa restauracji.
+- Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.
+- Każda odpowiedź musi być spersonalizowana i nawiązywać do konkretnego elementu opinii, najlepiej przez krótką parafrazę.
+- Adekwatnie reaguj na emocje autora opinii.
+- Nie pisz ogólników typu samo Dziękujemy za opinię, jeśli opinia zawiera konkretne treści.
+- Nie wymyślaj faktów, działań ani ustaleń, których nie ma w danych wejściowych.
+- Nie obiecuj rekompensaty, zwrotu pieniędzy, oddzwonienia ani konkretnych działań naprawczych, jeśli nie wynika to z danych.
+- Nie podawaj adresów e-mail, numerów telefonów ani innych danych kontaktowych.
+- Gdy trzeba zaprosić do dalszego kontaktu, użyj neutralnej formy, np.:
+  Zapraszamy do kontaktu przez dane dostępne na profilu firmy.
+- Nie używaj emoji.
+- Unikaj przesadnej formalności, urzędowego stylu i marketingowych ozdobników.
+
+Zwracanie się do autora:
+- Nie używaj samodzielnych form Pan/Pani.
+- Jeśli imię recenzenta jednoznacznie wskazuje płeć i brzmi naturalnie, możesz użyć formy, np.:
+  Pani Katarzyno / Panie Piotrze.
+- Jeśli płeć nie jest pewna, imię jest nickiem, inicjałem albo brzmi nienaturalnie, nie używaj imienia ani zwrotu grzecznościowego.
+- W takich przypadkach nie używaj też bezpośrednich form w stylu Ty, Tobie, Ci ani sformułowań wymagających określenia rodzaju.
+- Zamiast tego stosuj naturalne, neutralne konstrukcje, np.:
+  Dziękujemy za opinię,
+  Dziękujemy za wizytę,
+  Dziękujemy za podzielenie się uwagą,
+  Cieszymy się, że wizyta była udana,
+  Przykro nam, że wizyta nie spełniła oczekiwań,
+  Będzie nam miło gościć ponownie.
+
+Znaczenie wariantów:
+- soft:
+  najbardziej serdeczny, empatyczny i spokojny wariant; ma budować dobrą atmosferę, okazać wdzięczność albo zrozumienie i brzmieć ciepło, ale nadal naturalnie.
+- brief:
+  najkrótszy i najbardziej konkretny wariant; maksymalnie 2 zdania; bez lania wody i bez marketingowego stylu.
+- proactive:
+  najbardziej zaangażowany i uważny wariant; ma pokazywać gotowość do wyjaśnienia sytuacji lub poprawy; przy problemie może zaprosić do kontaktu przez profil firmy i krótko wyjaśnić po co; przy pozytywnej opinii ma pozostać naturalny i nie może być nachalny.
+
+Długość:
+- soft: 2-4 zdania
+- brief: maksymalnie 2 zdania
+- proactive: 2-4 zdania`;
+      const userPrompt = `Dopasowanie do oceny i wydźwięku opinii:
+${ratingInfo}
+${sentimentGuideline}
+Dostosuj ogólny ton: ${toneHint}
+
+Treść opinii:
+${reviewText}
+
+Wymagania dodatkowe:
+- Każdy wariant ma używać innego słownictwa i innych konstrukcji zdań.
+- Warianty nie mogą różnić się tylko pojedynczymi słowami.
+- Jeśli opinia zawiera problem, w każdym wariancie okaż zrozumienie i odnieś się do problemu.
+- Jeśli opinia jest pozytywna, podkreśl to, co klient docenił, i naturalnie zaproś ponownie.
+- Jeśli opinia jest mieszana, odnotuj plusy i uwagi.
+- Jeśli opinia nie zawiera konkretów, nie dopowiadaj szczegółów.
+
+Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
+      const promptPayload = `${systemPrompt}\n\n${userPrompt}`;
       console.log('[RC] Proxy request meta:', {
         proxy: proxySettings.proxyBase,
         promptLength: promptPayload.length,
@@ -704,7 +743,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const url = buildProxyUrl(proxySettings.proxyBase, GENERATE_ENDPOINT_PATH);
       const body = {
         model: DEFAULT_MODEL,
-        contents: [{ role: 'user', parts: [{ text: promptPayload }] }]
+        contents: [{ role: 'user', parts: [{ text: promptPayload }] }],
+        generationConfig: DEFAULT_GENERATION_CONFIG
       };
       const baseHeaders = {
         'Content-Type': 'application/json',
@@ -726,7 +766,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             ...baseHeaders,
             'Authorization': `Bearer ${sessionToken}`
           };
-          const resp = await fetch(url, { ...requestInitBase, headers });
+          const resp = await fetchWithTimeout(
+            url,
+            { ...requestInitBase, headers },
+            GENERATE_REQUEST_TIMEOUT_MS,
+            GENERATE_TIMEOUT_MESSAGE
+          );
           if (resp.status === 401 && attempt === 0) {
             attempt++;
             console.warn('[RC] JWT rejected by proxy, refreshing session.');
@@ -791,8 +836,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
       } catch (e) {
+        const errorMessage = e && e.message ? e.message : String(e);
         sendLogEvent(proxySettings, sessionToken, 'error', 'generate_exception', { error: String(e), rating });
-        sendResponse({ error: String(e) });
+        sendResponse({ error: errorMessage });
       }
       return;
     }
@@ -801,5 +847,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeBase, loadConfigFile };
+  module.exports = { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText };
 }

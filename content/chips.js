@@ -2,6 +2,7 @@
   const RC = global.RC;
   const { state, dom, reviews } = RC;
   const chips = RC.chips = RC.chips || {};
+  const RESTACK_HOVER_GRACE_MS = 400;
 
   chips.findCardForHash = function findCardForHash(hashVal){
     if (!hashVal) return null;
@@ -197,6 +198,35 @@
     return btn;
   };
 
+  function nowTs(){
+    return (global.performance && typeof global.performance.now === 'function')
+      ? global.performance.now()
+      : Date.now();
+  }
+
+  function lockRestack(entry, durationMs = RESTACK_HOVER_GRACE_MS){
+    if (!entry) return;
+    entry.restackLockedUntil = Math.max(entry.restackLockedUntil || 0, nowTs() + durationMs);
+  }
+
+  function bindInteractionGuards(entry){
+    const btn = entry?.button;
+    if (!entry || !btn || entry.interactionGuardsBound) return;
+
+    const hold = () => lockRestack(entry, RESTACK_HOVER_GRACE_MS);
+    const release = () => lockRestack(entry, RESTACK_HOVER_GRACE_MS);
+
+    btn.addEventListener('mouseenter', hold);
+    btn.addEventListener('mousemove', hold);
+    btn.addEventListener('mouseleave', release);
+    btn.addEventListener('focus', hold);
+    btn.addEventListener('blur', release);
+    btn.addEventListener('mousedown', hold);
+    btn.addEventListener('mouseup', release);
+
+    entry.interactionGuardsBound = true;
+  }
+
   function ensureGuard(entry, card){
     if (!entry || !card) return;
     if (entry.guardObserver) return;
@@ -205,6 +235,7 @@
       const btn = entry.button;
       if (!btn) return;
       if (entry.restacking) return;
+      if ((entry.restackLockedUntil || 0) > nowTs()) return;
       // Avoid shuffling while user hovers/clicks to prevent flicker and lost clicks
       if (btn.matches(':hover') || document.activeElement === btn) return;
 
@@ -318,9 +349,10 @@
       entry = null;
     }
     if (!entry){
-      entry = { button: chips.createChipButton(hashVal), card, slot: null, guardObserver: null, restacking: false, restackCount: 0, lastRestackTs: 0, restackTotal: 0, anchorStrategy: 'auto' };
+      entry = { button: chips.createChipButton(hashVal), card, slot: null, guardObserver: null, restacking: false, restackCount: 0, lastRestackTs: 0, restackTotal: 0, anchorStrategy: 'auto', restackLockedUntil: 0, interactionGuardsBound: false };
       state.chipRegistry.set(hashVal, entry);
     }
+    bindInteractionGuards(entry);
     const cardChanged = entry.card !== card;
     entry.card = card;
     if (cardChanged){

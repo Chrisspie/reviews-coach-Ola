@@ -332,11 +332,7 @@
               window.open(url, '_blank', 'noopener');
               return;
             }
-            // Fallback to login if no URL and SW failed
-            chrome.runtime.sendMessage({ type: 'START_GOOGLE_LOGIN' }, (r) => {
-              if (r && r.error) dom.showToast(r.error);
-              else dom.showToast('Zalogowano pomyślnie!');
-            });
+            dom.showToast(resp.error || 'Nie udalo sie otworzyc strony abonamentu.');
           }
         });
       });
@@ -349,7 +345,7 @@
     });
   }
 
-  const GENERATE_TIMEOUT_MS = 12000;
+  const GENERATE_TIMEOUT_MS = 22000;
 
   panelApi.generateReplies = function generateReplies(panelEl, card, variants, force, reviewSource) {
     const preview = panelEl.querySelector('#rc_preview');
