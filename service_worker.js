@@ -690,20 +690,24 @@ Zasady ogólne:
   Zapraszamy do kontaktu przez dane dostępne na profilu firmy.
 - Nie używaj emoji.
 - Unikaj przesadnej formalności, urzędowego stylu i marketingowych ozdobników.
+- Jeśli płeć autora nie jest pewna, nigdy nie używaj żadnych form zastępczych typu Pani/Pan, Pan/Pani, Panią/Pana ani podobnych. W takiej sytuacji odpowiedź ma pozostać całkowicie neutralna i bezosobowa.
 
 Zwracanie się do autora:
 - Nie używaj samodzielnych form Pan/Pani.
+- Nie używaj także form łączonych ani alternatywnych typu:
+  Pani/Pan, Pan/Pani, Panią/Pana, Pana/Panią, Pani/Panu, Panu/Pani, Szanowny Kliencie ani żadnych podobnych konstrukcji zastępczych.
 - Jeśli imię recenzenta jednoznacznie wskazuje płeć i brzmi naturalnie, możesz użyć formy, np.:
   Pani Katarzyno / Panie Piotrze.
-- Jeśli płeć nie jest pewna, imię jest nickiem, inicjałem albo brzmi nienaturalnie, nie używaj imienia ani zwrotu grzecznościowego.
+- Jeśli płeć nie jest pewna, imię jest nickiem, inicjałem albo brzmi nienaturalnie, nie używaj imienia ani żadnego zwrotu odnoszącego się bezpośrednio do osoby.
 - W takich przypadkach nie używaj też bezpośrednich form w stylu Ty, Tobie, Ci ani sformułowań wymagających określenia rodzaju.
-- Zamiast tego stosuj naturalne, neutralne konstrukcje, np.:
+- Zamiast tego stosuj wyłącznie naturalne, neutralne konstrukcje bezosobowe, np.:
   Dziękujemy za opinię,
   Dziękujemy za wizytę,
   Dziękujemy za podzielenie się uwagą,
   Cieszymy się, że wizyta była udana,
   Przykro nam, że wizyta nie spełniła oczekiwań,
-  Będzie nam miło gościć ponownie.
+  Będzie nam miło gościć ponownie,
+  Zapraszamy ponownie.
 
 Znaczenie wariantów:
 - soft:
@@ -732,6 +736,7 @@ Wymagania dodatkowe:
 - Jeśli opinia jest pozytywna, podkreśl to, co klient docenił, i naturalnie zaproś ponownie.
 - Jeśli opinia jest mieszana, odnotuj plusy i uwagi.
 - Jeśli opinia nie zawiera konkretów, nie dopowiadaj szczegółów.
+- Jeśli płeć autora nie jest pewna, odpowiedź musi pozostać neutralna i bezosobowa; nie używaj żadnych form typu Pan/Pani, Panią/Pana, Ty, Tobie, Ci ani żadnych sformułowań sugerujących płeć.
 
 Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
       const promptPayload = `${systemPrompt}\n\n${userPrompt}`;
