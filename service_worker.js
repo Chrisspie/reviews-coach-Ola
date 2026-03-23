@@ -1,5 +1,6 @@
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
+const EXTENSION_UPGRADE_ENDPOINT_PATH = '/api/extension/account/upgrade';
 const MAGIC_LINK_ENDPOINT_PATH = '/api/auth/magic-link';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
 const LOG_ENDPOINT_PATH = '/api/extension/log';
@@ -22,6 +23,9 @@ const CONFIG_FALLBACK_FILE = 'config.default.json';
 
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
 const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez magic link.';
+const GOOGLE_LOGIN_REQUIRED_CODE = 'GOOGLE_LOGIN_REQUIRED';
+const FRIENDLY_RETRY_MESSAGE = 'Sprobuj ponownie pozniej.';
+const FRIENDLY_UPGRADE_MESSAGE = 'Nie udalo sie otworzyc platnosci. Sprobuj ponownie pozniej.';
 
 let staticConfigPromise = null;
 let quotaState = null;
@@ -367,6 +371,29 @@ function createAuthRequiredError(message = AUTH_REQUIRED_MESSAGE) {
   return err;
 }
 
+function createErrorWithCode(message, code) {
+  const err = new Error(message || FRIENDLY_RETRY_MESSAGE);
+  if (code) err.code = code;
+  return err;
+}
+
+function sanitizeUserFacingError(message, fallback = FRIENDLY_RETRY_MESSAGE) {
+  const text = (message || '').toString().trim();
+  if (!text) return fallback;
+
+  const normalized = text.toLowerCase();
+  if (normalized.includes('failed to fetch') || normalized.includes('networkerror') || normalized.includes('load failed')) {
+    return fallback;
+  }
+  if (normalized.includes('auth_required') || normalized.includes('wymagane logowanie') || normalized.includes('sesja wygasla')) {
+    return 'Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.';
+  }
+  if (normalized.includes('google_login_required') || normalized.includes('zaloguj sie kontem google')) {
+    return 'Aby kupic abonament, zaloguj sie kontem Google w rozszerzeniu.';
+  }
+  return text;
+}
+
 async function fetchSessionToken(settings, options = {}) {
   const proxyBase = settings?.proxyBase;
   if (!proxyBase) { throw new Error('Brak Proxy URL w konfiguracji.'); }
@@ -412,7 +439,11 @@ async function fetchSessionToken(settings, options = {}) {
   }
   if (!resp.ok) {
     const errorText = parsed && (parsed.error || parsed.message) ? (parsed.error || parsed.message) : resp.statusText;
-    throw new Error(errorText || 'Nie udalo sie pobrac sesji z proxy.');
+    const err = new Error(errorText || 'Nie udalo sie pobrac sesji z proxy.');
+    if (parsed && parsed.code) {
+      err.code = parsed.code;
+    }
+    throw err;
   }
   const token = (parsed.token || parsed.jwt || '').trim();
   if (!token) throw new Error('Proxy nie zwrocilo tokenu JWT.');
@@ -472,6 +503,54 @@ function proxyErrorText(j) {
   return null;
 }
 
+async function openUpgradeCheckout(proxySettings) {
+  let sessionToken = await ensureSessionToken(proxySettings, { interactive: false });
+  let attempt = 0;
+
+  while (attempt < 2) {
+    const resp = await fetch(buildProxyUrl(proxySettings.proxyBase, EXTENSION_UPGRADE_ENDPOINT_PATH), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sessionToken}`,
+        'X-Extension-Id': chrome.runtime.id
+      },
+      body: JSON.stringify({ plan_id: 'pro_monthly' }),
+      mode: 'cors',
+      cache: 'no-store',
+      credentials: 'omit'
+    });
+
+    const raw = await resp.text();
+    let parsed = {};
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch (_) {
+      parsed = {};
+    }
+
+    if (resp.status === 401 && attempt === 0) {
+      attempt += 1;
+      const refreshed = await fetchSessionToken(proxySettings, { interactive: false });
+      sessionToken = refreshed.token;
+      continue;
+    }
+
+    if (!resp.ok) {
+      const message = parsed.message || parsed.error || resp.statusText || FRIENDLY_UPGRADE_MESSAGE;
+      throw createErrorWithCode(message, parsed.code);
+    }
+
+    const checkoutUrl = (parsed.checkout_url || '').toString().trim();
+    if (!checkoutUrl) {
+      throw createErrorWithCode(FRIENDLY_UPGRADE_MESSAGE);
+    }
+    return checkoutUrl;
+  }
+
+  throw createErrorWithCode('Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.', AUTH_REQUIRED_CODE);
+}
+
 function sendLogEvent(proxySettings, token, level, message, context) {
   if (!proxySettings?.proxyBase || !token || !message) return;
   try {
@@ -518,7 +597,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, profile });
       } catch (err) {
         console.error('[RC] Google login failed', err);
-        sendResponse({ error: err.message || 'Blad logowania Google.' });
+        sendResponse({ error: sanitizeUserFacingError(err && err.message, 'Blad logowania Google.') });
       }
       return;
     }
@@ -526,33 +605,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       (async () => {
         try {
           const proxySettings = await getProxySettings();
-          let upgradeUrl = proxySettings.upgradeUrl;
-          console.log('[RC] OPEN_UPGRADE_PAGE - upgradeUrl:', upgradeUrl); // DEBUG
-
-          if (!upgradeUrl) {
-            sendResponse({ error: 'Brak Upgrade URL w konfiguracji.' });
-            return;
-          }
-
-          // Attach a valid extension session if the user is already signed in.
-          const session = await getCachedSession();
-          console.log('[RC] OPEN_UPGRADE_PAGE - session after login check:', session); // DEBUG
-
-          const sessionValid = isSessionValid(session, proxySettings.proxyBase);
-          console.log('[RC] OPEN_UPGRADE_PAGE - isSessionValid:', sessionValid, 'hasToken:', !!session?.token); // DEBUG
-          if (sessionValid && session.token) {
-            const separator = upgradeUrl.includes('#') ? '&' : '#';
-            upgradeUrl += `${separator}accessToken=${encodeURIComponent(session.token)}`;
-            console.log('[RC] OPEN_UPGRADE_PAGE - final URL with token:', upgradeUrl); // DEBUG
-          } else {
-            console.warn('[RC] OPEN_UPGRADE_PAGE - No valid session, opening URL without token'); // DEBUG
-          }
-
-          chrome.tabs.create({ url: upgradeUrl });
-          sendResponse({ ok: true });
+          const checkoutUrl = await openUpgradeCheckout(proxySettings);
+          chrome.tabs.create({ url: checkoutUrl });
+          sendResponse({ ok: true, checkoutUrl });
         } catch (err) {
-          console.error('[RC] OPEN_UPGRADE_PAGE error:', err); // DEBUG
-          sendResponse({ error: err.message || 'Error opening upgrade page' });
+          console.error('[RC] OPEN_UPGRADE_PAGE error:', err);
+          sendResponse({
+            error: sanitizeUserFacingError(err && err.message, FRIENDLY_UPGRADE_MESSAGE),
+            code: err && err.code ? err.code : undefined
+          });
         }
       })();
       return true; // async response
@@ -605,7 +666,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         sendResponse({ ok: true, pending: true, emailSent: parsed.emailSent === true });
       } catch (err) {
-        const message = err && err.message ? err.message : 'Magic link failed.';
+        const message = sanitizeUserFacingError(err && err.message, FRIENDLY_RETRY_MESSAGE);
         sendResponse({ error: message });
       }
       return;
@@ -623,7 +684,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const profile = await getStoredAccountProfile();
         sendResponse({ ok: true, profile });
       } catch (err) {
-        const message = err && err.message ? err.message : 'Could not complete sign-in.';
+        const message = sanitizeUserFacingError(err && err.message, FRIENDLY_RETRY_MESSAGE);
         sendResponse({ error: message });
       }
       return;
@@ -647,7 +708,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sessionToken = await ensureSessionToken(proxySettings, { interactive: true });
       } catch (err) {
         console.error('[RC] Nie udalo sie pobrac tokenu proxy', err);
-        const message = err && err.message ? err.message : 'Nie udalo sie pobrac tokenu proxy.';
+        const message = sanitizeUserFacingError(err && err.message, FRIENDLY_RETRY_MESSAGE);
         sendResponse({ error: message, errorCode: err && err.code ? err.code : undefined });
         return;
       }
@@ -800,7 +861,7 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
             return;
           }
           if (!resp.ok) {
-            const proxyErr = proxyErrorText(j) || j.error || resp.statusText || 'Blad proxy.';
+            const proxyErr = sanitizeUserFacingError(proxyErrorText(j) || j.error || resp.statusText, FRIENDLY_RETRY_MESSAGE);
             const enriched = quotaFromResp || normalizeQuota(j?.quota, proxySettings.upgradeUrl);
             if (enriched) updateQuotaState(enriched);
             sendResponse({ error: proxyErr, errorCode: j?.code, freeLimit: j?.limit, upgradeUrl: j?.upgradeUrl || proxySettings.upgradeUrl, quota: enriched });
@@ -808,7 +869,8 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
             sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_rejected', { error: proxyErr, code: j?.code, remaining: remainingForLog, quotaType: enriched?.type });
             return;
           }
-          const err = proxyErrorText(j);
+          const rawProxyErr = proxyErrorText(j);
+          const err = rawProxyErr ? sanitizeUserFacingError(rawProxyErr, FRIENDLY_RETRY_MESSAGE) : null;
           if (err) {
             if (quotaFromResp) updateQuotaState(quotaFromResp);
             const logRemaining = quotaRemainingValue(quotaFromResp);
@@ -841,7 +903,7 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
           return;
         }
       } catch (e) {
-        const errorMessage = e && e.message ? e.message : String(e);
+        const errorMessage = sanitizeUserFacingError(e && e.message ? e.message : String(e), FRIENDLY_RETRY_MESSAGE);
         sendLogEvent(proxySettings, sessionToken, 'error', 'generate_exception', { error: String(e), rating });
         sendResponse({ error: errorMessage });
       }

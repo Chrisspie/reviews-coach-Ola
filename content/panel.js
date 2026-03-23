@@ -323,16 +323,9 @@
     const upgradeBtn = panelEl.querySelector('#rc_upgrade');
     if (upgradeBtn) {
       upgradeBtn.addEventListener('click', () => {
-        // Use service worker to open upgrade page with auth token if available
         chrome.runtime.sendMessage({ type: 'OPEN_UPGRADE_PAGE' }, (resp) => {
           if (resp && resp.error) {
-            // Fallback to manual open if SW fails or old version
-            const url = (upgradeBtn.dataset.url || '').trim();
-            if (url) {
-              window.open(url, '_blank', 'noopener');
-              return;
-            }
-            dom.showToast(resp.error || 'Nie udalo sie otworzyc strony abonamentu.');
+            dom.showToast(resp.error || 'Nie udalo sie otworzyc platnosci. Sprobuj pozniej.');
           }
         });
       });

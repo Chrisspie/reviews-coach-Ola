@@ -30,6 +30,7 @@ function createStorageArea() {
 }
 
 let onMessageHandler = null;
+let createdTabs = [];
 
 // global.crypto = webcrypto;
 const sessionArea = createStorageArea();
@@ -42,6 +43,11 @@ global.chrome = {
     getURL: fileName => fileName,
     getManifest: () => ({ version: '1.0.0' }),
     onMessage: { addListener: (fn) => { onMessageHandler = fn; } }
+  },
+  tabs: {
+    create: ({ url }) => {
+      createdTabs.push(url);
+    }
   },
   storage: {
     session: sessionArea,
@@ -64,6 +70,7 @@ describe('Service Worker Logic', () => {
   beforeEach(async () => {
     await sessionArea.clear();
     await localArea.clear();
+    createdTabs = [];
     global.fetch = async () => { throw new Error('fetch not mocked'); };
   });
 
@@ -384,5 +391,140 @@ describe('Service Worker Logic', () => {
     expect(prompt).toContain('Jeśli opinia zawiera problem, w każdym wariancie okaż zrozumienie i odnieś się do problemu.');
     expect(prompt).toContain('Jedzenie było zimne i długo czekaliśmy.');
     expect(prompt).toContain('Zapraszamy do kontaktu przez dane dostępne na profilu firmy.');
+  });
+
+  test('OPEN_UPGRADE_PAGE opens Stripe checkout directly for logged-in users', async () => {
+    await sessionArea.set({
+      proxySession: {
+        token: 'cached-jwt',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json' || url === 'config.default.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            upgradeUrl: 'http://localhost:5173/#plany'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/account/upgrade') {
+        expect(options.headers.Authorization).toBe('Bearer cached-jwt');
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ checkout_url: 'https://checkout.stripe.com/test-session' })
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const result = onMessageHandler({ type: 'OPEN_UPGRADE_PAGE' }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(result).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(response).toEqual({ ok: true, checkoutUrl: 'https://checkout.stripe.com/test-session' });
+    expect(createdTabs).toEqual(['https://checkout.stripe.com/test-session']);
+  });
+
+  test('OPEN_UPGRADE_PAGE returns Google login guidance for license-only sessions', async () => {
+    await sessionArea.set({
+      proxySession: {
+        token: 'cached-license-jwt',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url) => {
+      if (url === 'https://proxy.local/api/extension/account/upgrade') {
+        return {
+          ok: false,
+          status: 403,
+          text: async () => JSON.stringify({
+            error: 'Aby kupić abonament, zaloguj się kontem Google w rozszerzeniu.',
+            code: 'GOOGLE_LOGIN_REQUIRED'
+          })
+        };
+      }
+      if (url === 'config.json' || url === 'config.default.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ proxyBase: 'https://proxy.local' })
+        };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const result = onMessageHandler({ type: 'OPEN_UPGRADE_PAGE' }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(result).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(response).toEqual({
+      error: 'Aby kupić abonament, zaloguj się kontem Google w rozszerzeniu.',
+      code: 'GOOGLE_LOGIN_REQUIRED'
+    });
+    expect(createdTabs).toEqual([]);
+  });
+
+  test('GENERATE_ALL masks raw fetch failures with a friendly retry message', async () => {
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url) => {
+      if (url === 'config.json' || url === 'config.default.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        throw new Error('Failed to fetch');
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: { rating: '5', text: 'Super obsluga' }
+    }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(response).toEqual({ error: 'Sprobuj ponownie pozniej.' });
   });
 });
