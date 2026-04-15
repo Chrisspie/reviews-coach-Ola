@@ -13,12 +13,15 @@
   if (typeof state.scanIntervalId === 'undefined') state.scanIntervalId = 0;
   if (!state.handlers) state.handlers = {};
   if (typeof state.initialized === 'undefined') state.initialized = false;
+  if (!state.placeContextCache) state.placeContextCache = null;
 
   const config = RC.config = RC.config || {};
   if (typeof config.minReviewLength === 'undefined') config.minReviewLength = 16;
   config.storageKeys = config.storageKeys || {
     reviewText: 'rcReviewText',
-    rating: 'rcRating'
+    rating: 'rcRating',
+    placeContextMap: 'rcPlaceContextByKey',
+    businessContext: 'rcBusinessContext'
   };
   config.selectors = config.selectors || {
     cards: '[role="article"], [data-review-id], div[aria-label*="review"], div.hxVHQb',

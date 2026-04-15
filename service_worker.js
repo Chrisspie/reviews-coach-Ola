@@ -10,6 +10,8 @@ const LOG_PROMPT_ELLIPSIS = '...';
 const GENERATE_REQUEST_TIMEOUT_MS = 18 * 1000;
 const GENERATE_TIMEOUT_MESSAGE = 'Usluga generowania odpowiada zbyt wolno. Sprobuj ponownie.';
 const MAX_REVIEW_TEXT_CHARS = 1500;
+const MAX_PLACE_TYPE_CHARS = 80;
+const MAX_PLACE_NAME_CHARS = 120;
 const DEFAULT_GENERATION_CONFIG = {
   candidateCount: 1,
   temperature: 0.5,
@@ -18,14 +20,17 @@ const DEFAULT_GENERATION_CONFIG = {
 const INSTALL_ID_KEY = 'rcInstallId';
 const DEVICE_TOKEN_KEY = 'rcDeviceToken';
 const ACCOUNT_PROFILE_KEY = 'rcAccountProfile';
-const CONFIG_PRIMARY_FILE = 'config.json';
-const CONFIG_FALLBACK_FILE = 'config.default.json';
+const CONFIG_FILE = 'config.json';
+const MAPS_TAB_URLS = ['https://*.google.com/maps/*', 'https://*.google.pl/maps/*'];
 
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
-const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez magic link.';
+const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez Google.';
 const GOOGLE_LOGIN_REQUIRED_CODE = 'GOOGLE_LOGIN_REQUIRED';
+const AUTH_STATUS_CHANGED_MESSAGE = 'AUTH_STATUS_CHANGED';
 const FRIENDLY_RETRY_MESSAGE = 'Sprobuj ponownie pozniej.';
 const FRIENDLY_UPGRADE_MESSAGE = 'Nie udalo sie otworzyc platnosci. Sprobuj ponownie pozniej.';
+const FRIENDLY_OVERLOAD_MESSAGE = 'Serwer jest obecnie obciazony. Sprobuj ponownie za chwile.';
+const OVERLOAD_RETRY_DELAY_MS = 1200;
 
 let staticConfigPromise = null;
 let quotaState = null;
@@ -41,6 +46,12 @@ function truncateReviewText(value, maxLen = MAX_REVIEW_TEXT_CHARS) {
   const str = (value || '').toString().trim();
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen).trimEnd() + '...';
+}
+
+function truncateContextField(value, maxLen) {
+  const str = (value || '').toString().replace(/\s+/g, ' ').trim();
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen).trimEnd();
 }
 
 function getProxySessionStorage() {
@@ -77,16 +88,14 @@ async function loadConfigFile(fileName) {
 async function loadStaticConfig() {
   if (!staticConfigPromise) {
     staticConfigPromise = (async () => {
-      for (const file of [CONFIG_PRIMARY_FILE, CONFIG_FALLBACK_FILE]) {
-        try {
-          const cfg = await loadConfigFile(file);
-          console.info('[RC] Loaded proxy config from', file);
-          return cfg;
-        } catch (err) {
-          console.warn('[RC] Config file skipped', { file, error: String(err) });
-        }
+      try {
+        const cfg = await loadConfigFile(CONFIG_FILE);
+        console.info('[RC] Loaded proxy config from', CONFIG_FILE);
+        return cfg;
+      } catch (err) {
+        console.warn('[RC] Config file skipped', { file: CONFIG_FILE, error: String(err) });
+        return null;
       }
-      return null;
     })();
   }
   return staticConfigPromise;
@@ -97,7 +106,7 @@ async function getProxySettings() {
   if (cfg && cfg.proxyBase) {
     return cfg;
   }
-  throw new Error('Brak config.json: ustaw proxyBase w pliku konfiguracji.');
+  throw new Error('Brak config.json. Zbuduj rozszerzenie przed uruchomieniem.');
 }
 
 function buildProxyUrl(base, path) {
@@ -180,13 +189,14 @@ function normalizeQuota(raw, fallbackUrl = '') {
   if (!Number.isFinite(limit) || limit <= 0) return null;
   const remainingNum = Number(raw.remaining ?? raw.remainingSeconds);
   const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
+  const expiresAt = raw.expiresAt ? new Date(raw.expiresAt).toISOString() : null;
   return {
     type: 'usage',
     limit: Math.max(0, Math.floor(limit)),
     remaining,
     limitSeconds: null,
     remainingSeconds: null,
-    expiresAt: null,
+    expiresAt,
     upgradeUrl
   };
 }
@@ -224,13 +234,15 @@ function quotaFromHeaders(resp, fallbackUrl = '') {
   if (!Number.isFinite(limit) || limit <= 0) return null;
   const remainingNum = Number(resp.headers.get('x-free-remaining'));
   const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
+  const expiresAtHeader = resp.headers.get('x-free-expires-at');
+  const expiresAt = expiresAtHeader ? new Date(expiresAtHeader).toISOString() : null;
   return {
     type: 'usage',
     limit: Math.max(0, Math.floor(limit)),
     remaining,
     limitSeconds: null,
     remainingSeconds: null,
-    expiresAt: null,
+    expiresAt,
     upgradeUrl
   };
 }
@@ -287,6 +299,49 @@ async function storeAccountProfile(profile) {
 
 async function clearAccountProfile() {
   await chrome.storage.local.remove([ACCOUNT_PROFILE_KEY]);
+}
+
+function buildStoredProfile(rawProfile, parsed) {
+  if (!rawProfile || typeof rawProfile !== 'object') return null;
+  const license = parsed && parsed.license && typeof parsed.license === 'object' ? parsed.license : {};
+  return {
+    email: (rawProfile.email || '').toString(),
+    sub: (rawProfile.sub || '').toString(),
+    name: (rawProfile.name || '').toString(),
+    plan: (rawProfile.plan || parsed?.plan || '').toString(),
+    licenseId: (rawProfile.licenseId || license.id || '').toString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function getAuthStatusPayload(options = {}) {
+  const refresh = options.refresh !== false;
+  let profile = await getStoredAccountProfile();
+  let quota = getQuotaState();
+  const cached = await getCachedSession();
+  if (!quota && cached?.quota) {
+    quota = cached.quota;
+    updateQuotaState(quota);
+  }
+
+  const deviceToken = refresh ? await getStoredDeviceToken() : '';
+  if (refresh && (!profile || !quota) && (cached?.token || deviceToken)) {
+    try {
+      const proxySettings = await getProxySettings();
+      await ensureSessionToken(proxySettings, { interactive: false });
+      profile = await getStoredAccountProfile();
+      quota = getQuotaState();
+      const refreshed = await getCachedSession();
+      if (!quota && refreshed?.quota) {
+        quota = refreshed.quota;
+        updateQuotaState(quota);
+      }
+    } catch (err) {
+      console.warn('[RC] Nie udalo sie odswiezyc statusu konta', err);
+    }
+  }
+
+  return { profile: profile || null, quota: quota || null };
 }
 
 async function getStoredDeviceToken() {
@@ -363,6 +418,35 @@ async function logoutAccount() {
   await clearStoredDeviceToken();
   await clearAccountProfile();
   await clearStoredSession();
+  updateQuotaState(null);
+}
+
+async function broadcastAuthStatusChanged(reason) {
+  if (!chrome.tabs || typeof chrome.tabs.query !== 'function' || typeof chrome.tabs.sendMessage !== 'function') {
+    return;
+  }
+  let status = { profile: null, quota: null };
+  try {
+    status = await getAuthStatusPayload();
+  } catch (err) {
+    console.warn('[RC] Nie udalo sie pobrac statusu auth do powiadomienia kart.', err);
+  }
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: MAPS_TAB_URLS });
+  } catch (err) {
+    console.warn('[RC] Nie udalo sie znalezc kart do powiadomienia o auth.', err);
+    return;
+  }
+  const message = {
+    type: AUTH_STATUS_CHANGED_MESSAGE,
+    reason: reason || '',
+    profile: status.profile || null,
+    quota: status.quota || null
+  };
+  await Promise.allSettled((tabs || [])
+    .filter(tab => tab && Number.isFinite(tab.id))
+    .map(tab => chrome.tabs.sendMessage(tab.id, message).catch(() => {})));
 }
 
 function createAuthRequiredError(message = AUTH_REQUIRED_MESSAGE) {
@@ -385,6 +469,9 @@ function sanitizeUserFacingError(message, fallback = FRIENDLY_RETRY_MESSAGE) {
   if (normalized.includes('failed to fetch') || normalized.includes('networkerror') || normalized.includes('load failed')) {
     return fallback;
   }
+  if (isOverloadMessage(text)) {
+    return FRIENDLY_OVERLOAD_MESSAGE;
+  }
   if (normalized.includes('auth_required') || normalized.includes('wymagane logowanie') || normalized.includes('sesja wygasla')) {
     return 'Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.';
   }
@@ -392,6 +479,20 @@ function sanitizeUserFacingError(message, fallback = FRIENDLY_RETRY_MESSAGE) {
     return 'Aby kupic abonament, zaloguj sie kontem Google w rozszerzeniu.';
   }
   return text;
+}
+
+function isOverloadMessage(message) {
+  const normalized = (message || '').toString().trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes('currently experiencing high demand')
+    || normalized.includes('spikes in demand are usually temporary')
+    || normalized.includes('resource_exhausted')
+    || normalized.includes('resource exhausted')
+    || normalized.includes('too many requests');
+}
+
+async function waitMs(ms) {
+  await new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function fetchSessionToken(settings, options = {}) {
@@ -415,7 +516,7 @@ async function fetchSessionToken(settings, options = {}) {
   } else if (deviceToken) {
     body.deviceToken = deviceToken;
   } else {
-    console.warn('[RC] No auth method available. User must sign in via magic link.');
+    console.warn('[RC] No auth method available. User must sign in with Google.');
     throw createAuthRequiredError();
   }
   const headers = {
@@ -454,12 +555,7 @@ async function fetchSessionToken(settings, options = {}) {
     await storeDeviceToken(parsed.deviceToken);
   }
   if (parsed.profile) {
-    await storeAccountProfile({
-      email: (parsed.profile.email || '').toString(),
-      sub: (parsed.profile.sub || '').toString(),
-      name: (parsed.profile.name || '').toString(),
-      updatedAt: new Date().toISOString()
-    });
+    await storeAccountProfile(buildStoredProfile(parsed.profile, parsed));
   }
   const session = { token, proxyBase, expiresAt, quota: normalizedQuota };
   await storeSession(session);
@@ -575,6 +671,14 @@ function sendLogEvent(proxySettings, token, level, message, context) {
   } catch (_) { }
 }
 
+function openExtensionOptionsPage() {
+  if (typeof chrome.runtime.openOptionsPage === 'function') {
+    return chrome.runtime.openOptionsPage();
+  }
+  chrome.tabs.create({ url: chrome.runtime.getURL('options.html') });
+  return Promise.resolve();
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg.type === 'GET_QUOTA_STATUS') {
@@ -582,8 +686,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === 'GET_AUTH_STATUS') {
-      const profile = await getStoredAccountProfile();
-      sendResponse({ profile });
+      const status = await getAuthStatusPayload();
+      sendResponse(status);
+      return;
+    }
+    if (msg.type === 'OPEN_LOGIN_PAGE' || msg.type === 'OPEN_OPTIONS_PAGE') {
+      try {
+        await openExtensionOptionsPage();
+        sendResponse({ ok: true });
+      } catch (err) {
+        console.error('[RC] Open options page error:', err);
+        sendResponse({ error: 'Nie udalo sie otworzyc opcji. Otworz opcje rozszerzenia recznie.' });
+      }
       return;
     }
     if (msg.type === 'START_GOOGLE_LOGIN') {
@@ -592,9 +706,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const idToken = await requestGoogleIdToken(proxySettings);
         await clearStoredDeviceToken();
         await clearStoredSession();
-        await fetchSessionToken(proxySettings, { idToken });
+        const session = await fetchSessionToken(proxySettings, { idToken });
         const profile = await getStoredAccountProfile();
-        sendResponse({ ok: true, profile });
+        await broadcastAuthStatusChanged('login');
+        sendResponse({ ok: true, profile, quota: session.quota || getQuotaState() });
       } catch (err) {
         console.error('[RC] Google login failed', err);
         sendResponse({ error: sanitizeUserFacingError(err && err.message, 'Blad logowania Google.') });
@@ -659,9 +774,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return;
           }
           await clearStoredSession();
-          await fetchSessionToken(proxySettings, { code });
+          const session = await fetchSessionToken(proxySettings, { code });
           const profile = await getStoredAccountProfile();
-          sendResponse({ ok: true, profile });
+          await broadcastAuthStatusChanged('login');
+          sendResponse({ ok: true, profile, quota: session.quota || getQuotaState() });
           return;
         }
         sendResponse({ ok: true, pending: true, emailSent: parsed.emailSent === true });
@@ -680,9 +796,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const proxySettings = await getProxySettings();
         await clearStoredSession();
-        await fetchSessionToken(proxySettings, { code });
+        const session = await fetchSessionToken(proxySettings, { code });
         const profile = await getStoredAccountProfile();
-        sendResponse({ ok: true, profile });
+        await broadcastAuthStatusChanged('login');
+        sendResponse({ ok: true, profile, quota: session.quota || getQuotaState() });
       } catch (err) {
         const message = sanitizeUserFacingError(err && err.message, FRIENDLY_RETRY_MESSAGE);
         sendResponse({ error: message });
@@ -691,6 +808,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     if (msg.type === 'LOGOUT') {
       await logoutAccount();
+      await broadcastAuthStatusChanged('logout');
       sendResponse({ ok: true });
       return;
     }
@@ -702,7 +820,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
       const proxySettings = await getProxySettings();
-      if (!proxySettings.proxyBase) { sendResponse({ error: 'Brak Proxy URL. Uzupelnij plik config.json.' }); return; }
+      if (!proxySettings.proxyBase) { sendResponse({ error: 'Brak Proxy URL. Zbuduj rozszerzenie ponownie.' }); return; }
       let sessionToken = '';
       try {
         sessionToken = await ensureSessionToken(proxySettings, { interactive: true });
@@ -715,14 +833,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const ratingRaw = payload.rating == null ? '?' : payload.rating;
       const rating = (typeof ratingRaw === 'string' ? ratingRaw : String(ratingRaw)).trim() || '?';
       const reviewText = truncateReviewText(payload.text == null ? '' : String(payload.text));
-      console.log('[RC] Worker payload:', { rating, textLength: reviewText.length, sample: reviewText.slice(0, 140) });
+      const placeType = truncateContextField(payload.placeType, MAX_PLACE_TYPE_CHARS);
+      const placeName = truncateContextField(payload.placeName, MAX_PLACE_NAME_CHARS);
+      console.log('[RC] Worker payload:', {
+        rating,
+        textLength: reviewText.length,
+        sample: reviewText.slice(0, 140),
+        placeType,
+        placeName
+      });
       const ratingNumber = parseFloat(rating);
       let toneHint = 'neutralny i uprzejmy';
       let sentimentGuideline = 'Brak oceny: zachowaj neutralność i zaproponuj pomoc, jeśli klient opisuje problem.';
       if (!Number.isNaN(ratingNumber)) {
         if (ratingNumber <= 2) {
-          toneHint = 'empatyczny i spokojny, zachęcający do kontaktu przez profil';
-          sentimentGuideline = 'Klient jest niezadowolony: przeproś, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.';
+          toneHint = 'empatyczny, spokojny i profesjonalny';
+          sentimentGuideline = 'Klient jest niezadowolony: okaż zrozumienie, odnieś się do problemu i dobierz strategię odpowiedzi bez zakładania winy firmy.';
         } else if (ratingNumber <= 3.5) {
           toneHint = 'rzeczowy i uprzejmy';
           sentimentGuideline = 'Klient ma mieszane odczucia: podziękuj, odnieś się do uwag i zapewnij o wsparciu.';
@@ -732,6 +858,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       }
       const ratingInfo = (rating && rating !== '?') ? 'Ocena klienta: ' + rating + '/5.' : 'Ocena klienta: brak danych.';
+      const placeContextLines = [];
+      if (placeType) placeContextLines.push('- Typ dzialalnosci miejsca: ' + placeType + '.');
+      if (placeName) placeContextLines.push('- Nazwa firmy: "' + placeName + '". To nazwa wlasna firmy lub miejsca.');
+      const placeContextBlock = placeContextLines.length
+        ? 'Kontekst miejsca:\n' + placeContextLines.join('\n')
+        : 'Kontekst miejsca:\n- Brak dodatkowych danych o miejscu.';
       const systemPrompt = `Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.
 
 Zadanie:
@@ -739,7 +871,7 @@ Na podstawie opinii klienta wygeneruj 3 różne odpowiedzi w formacie JSON:
 {"soft":"...","brief":"...","proactive":"..."}
 
 Zasady ogólne:
-- Pisz naturalnie, uprzejmie i po ludzku, jak obsługa restauracji.
+- Pisz naturalnie, uprzejmie i po ludzku, jak odpowiedź publikowana w imieniu firmy lub miejsca.
 - Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.
 - Każda odpowiedź musi być spersonalizowana i nawiązywać do konkretnego elementu opinii, najlepiej przez krótką parafrazę.
 - Adekwatnie reaguj na emocje autora opinii.
@@ -772,11 +904,11 @@ Zwracanie się do autora:
 
 Znaczenie wariantów:
 - soft:
-  najbardziej serdeczny, empatyczny i spokojny wariant; ma budować dobrą atmosferę, okazać wdzięczność albo zrozumienie i brzmieć ciepło, ale nadal naturalnie.
+  najbardziej serdeczny, empatyczny i spokojny wariant; ma budować dobrą atmosferę, okazać wdzięczność albo zrozumienie i brzmieć ciepło, ale nadal naturalnie; przy problemie jego głównym zadaniem jest deeskalacja i okazanie zrozumienia.
 - brief:
-  najkrótszy i najbardziej konkretny wariant; maksymalnie 2 zdania; bez lania wody i bez marketingowego stylu.
+  najkrótszy i najbardziej konkretny wariant; maksymalnie 2 zdania; bez lania wody i bez marketingowego stylu; przy problemie ma krótko i rzeczowo odnieść się do sedna uwagi bez wchodzenia w spór, bez bronienia firmy i bez przyznawania winy.
 - proactive:
-  najbardziej zaangażowany i uważny wariant; ma pokazywać gotowość do wyjaśnienia sytuacji lub poprawy; przy problemie może zaprosić do kontaktu przez profil firmy i krótko wyjaśnić po co; przy pozytywnej opinii ma pozostać naturalny i nie może być nachalny.
+  najbardziej zaangażowany i uważny wariant; ma pokazywać gotowość do dalszej rozmowy, doprecyzowania albo sprawdzenia tematu; przy problemie może zaprosić do kontaktu przez profil firmy, ale neutralnie i bez sugerowania, że firma na pewno popełniła błąd; przy pozytywnej opinii ma pozostać naturalny i nie może być nachalny.
 
 Długość:
 - soft: 2-4 zdania
@@ -792,15 +924,34 @@ ${reviewText}
 
 Wymagania dodatkowe:
 - Każdy wariant ma używać innego słownictwa i innych konstrukcji zdań.
-- Warianty nie mogą różnić się tylko pojedynczymi słowami.
-- Jeśli opinia zawiera problem, w każdym wariancie okaż zrozumienie i odnieś się do problemu.
+- Warianty nie mogą różnić się tylko pojedynczymi słowami ani samym tonem; mają różnić się także strategią odpowiedzi.
+- Jeśli opinia zawiera problem, każdy wariant ma odnieść się do problemu, ale innym ruchem komunikacyjnym:
+  soft ma przede wszystkim okazać zrozumienie i złagodzić napięcie,
+  brief ma przede wszystkim odpowiedzieć krótko i rzeczowo,
+  proactive ma przede wszystkim pokazać gotowość do dalszej rozmowy albo doprecyzowania.
+- Każdy wariant może zakończyć się neutralnym zaproszeniem do kontaktu w razie pytań, ale zaproszenie do kontaktu nie może być jedyną treścią odpowiedzi.
+- Jeśli opinia dotyczy ceny, wyceny, kosztu, warunków albo subiektywnej oceny typu za drogo, nie broń szczegółowej polityki firmy i nie wymyślaj jej; zachowaj neutralność.
+- O ostrożnym, ogólnym sposobie wyceny lub zakresie usługi wspominaj tylko wtedy, gdy jasno wynika z opinii albo z kontekstu miejsca, że chodzi o usługę wycenianą indywidualnie.
+- Jeśli opinia dotyczy jakości, obsługi, opóźnienia albo innego problemu w przebiegu usługi, uznaj uwagę i zachowaj empatię, ale nie stwierdzaj ani nie sugeruj, że wina na pewno leży po stronie firmy.
 - Jeśli opinia jest pozytywna, podkreśl to, co klient docenił, i naturalnie zaproś ponownie.
 - Jeśli opinia jest mieszana, odnotuj plusy i uwagi.
 - Jeśli opinia nie zawiera konkretów, nie dopowiadaj szczegółów.
 - Jeśli płeć autora nie jest pewna, odpowiedź musi pozostać neutralna i bezosobowa; nie używaj żadnych form typu Pan/Pani, Panią/Pana, Ty, Tobie, Ci ani żadnych sformułowań sugerujących płeć.
 
 Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
-      const promptPayload = `${systemPrompt}\n\n${userPrompt}`;
+      const contextInstructionBlock = `Instrukcje dotyczace kontekstu miejsca:
+- Jesli znasz typ dzialalnosci miejsca, wykorzystaj go do lepszego dopasowania slownictwa i kontekstu odpowiedzi.
+- Jesli znasz nazwe firmy, traktuj ja wylacznie jako nazwe wlasna miejsca lub firmy. Uzywaj jej tylko wtedy, gdy brzmi to naturalnie i nie w kazdym wariancie.
+- Nie zakladaj menu, oferty, procesu obslugi ani zakresu uslug wylacznie na podstawie typu dzialalnosci lub nazwy firmy.`;
+      const promptRefinementBlock = `Priorytetowe doprecyzowania:
+- Traktuj odpowiedz jako przygotowywana w imieniu firmy lub miejsca. Nie zakladaj struktury firmy, roli autora odpowiedzi ani tego, ze chodzi o restauracje, chyba ze wynika to z kontekstu miejsca albo z samej opinii.
+- Jesli opinia jest krotka, ogolna albo malo konkretna, odpowiedz tez ma byc zwiezla i nie moze dopowiadac szczegolow branzy ani oferty.
+- Jesli opinia jest negatywna albo mieszana, trzy warianty maja roznic sie nie tylko stylem, ale tez glownym ruchem odpowiedzi: soft lagodzi napiecie, brief odpowiada rzeczowo, proactive najmocniej otwiera rozmowe.
+- Jesli uzywasz imienia recenzenta albo formy typu Panie Pawle / Pani Katarzyno, umiesc je wylacznie na samym poczatku odpowiedzi albo na poczatku pierwszego zdania. Nigdy w srodku ani na koncu odpowiedzi.
+- Jesli nie da sie uzyc imienia naturalnie na poczatku, nie uzywaj imienia wcale.
+- Wariant brief ma miec maksymalnie 2 zdania i maksymalnie 220 znakow.
+- Zwroc tylko poprawny JSON bez markdown, backtickow, blokow kodu, komentarzy i bez zadnego tekstu przed albo po JSON.`;
+      const promptPayload = `${systemPrompt}\n\n${contextInstructionBlock}\n\n${promptRefinementBlock}\n\n${placeContextBlock}\n\n${userPrompt}`;
       console.log('[RC] Proxy request meta:', {
         proxy: proxySettings.proxyBase,
         promptLength: promptPayload.length,
@@ -824,7 +975,12 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
         cache: 'no-store',
         credentials: 'omit'
       };
-      sendLogEvent(proxySettings, sessionToken, 'info', 'generate_start', { rating, textLength: reviewText.length });
+      sendLogEvent(proxySettings, sessionToken, 'info', 'generate_start', {
+        rating,
+        textLength: reviewText.length,
+        placeType,
+        hasPlaceName: !!placeName
+      });
       let attempt = 0;
       try {
         while (attempt < 2) {
@@ -861,7 +1017,15 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
             return;
           }
           if (!resp.ok) {
-            const proxyErr = sanitizeUserFacingError(proxyErrorText(j) || j.error || resp.statusText, FRIENDLY_RETRY_MESSAGE);
+            const rawErrorText = proxyErrorText(j) || j.error || resp.statusText;
+            const retryableOverload = (resp.status === 429 || isOverloadMessage(rawErrorText)) && attempt === 0;
+            if (retryableOverload) {
+              attempt++;
+              sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_retry_overload', { status: resp.status });
+              await waitMs(OVERLOAD_RETRY_DELAY_MS);
+              continue;
+            }
+            const proxyErr = sanitizeUserFacingError(rawErrorText, FRIENDLY_RETRY_MESSAGE);
             const enriched = quotaFromResp || normalizeQuota(j?.quota, proxySettings.upgradeUrl);
             if (enriched) updateQuotaState(enriched);
             sendResponse({ error: proxyErr, errorCode: j?.code, freeLimit: j?.limit, upgradeUrl: j?.upgradeUrl || proxySettings.upgradeUrl, quota: enriched });
@@ -872,6 +1036,12 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
           const rawProxyErr = proxyErrorText(j);
           const err = rawProxyErr ? sanitizeUserFacingError(rawProxyErr, FRIENDLY_RETRY_MESSAGE) : null;
           if (err) {
+            if (attempt === 0 && isOverloadMessage(rawProxyErr)) {
+              attempt++;
+              sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_retry_overload', { status: resp.status });
+              await waitMs(OVERLOAD_RETRY_DELAY_MS);
+              continue;
+            }
             if (quotaFromResp) updateQuotaState(quotaFromResp);
             const logRemaining = quotaRemainingValue(quotaFromResp);
             sendLogEvent(proxySettings, sessionToken, 'warn', 'generate_error', { error: err, remaining: logRemaining, quotaType: quotaFromResp?.type });

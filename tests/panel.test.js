@@ -6,7 +6,7 @@ const { JSDOM } = require('jsdom');
 function setupPanelEnv(overrides = {}){
   const dom = new JSDOM('<!DOCTYPE html><body></body>', {
     pretendToBeVisual: true,
-    url: 'https://example.com'
+    url: overrides.url || 'https://example.com'
   });
   const { window } = dom;
   const customSetTimeout = typeof overrides.setTimeout === 'function' ? overrides.setTimeout : null;
@@ -81,8 +81,21 @@ function setupPanelEnv(overrides = {}){
     : (()=>true);
   window.document.execCommand = execCommand;
 
+  const storageState = { ...(overrides.initialLocalStorage || {}) };
   const storageGet = overrides.storageGet || (async ()=>({}));
   const storageSet = overrides.storageSet || (async ()=>{});
+  const storageLocalGet = overrides.storageLocalGet || (async (keys)=>{
+    if (!keys) return { ...storageState };
+    const list = Array.isArray(keys) ? keys : [keys];
+    const out = {};
+    list.forEach((key) => {
+      out[key] = storageState[key];
+    });
+    return out;
+  });
+  const storageLocalSet = overrides.storageLocalSet || (async (pairs)=>{
+    Object.assign(storageState, pairs || {});
+  });
   const sendMessageResponse = overrides.sendMessageResponse || {
     soft: 'Delikatna odpowiedz',
     brief: 'Rzeczowa odpowiedz',
@@ -96,10 +109,22 @@ function setupPanelEnv(overrides = {}){
     }
     if (typeof cb === 'function') cb(sendMessageResponse);
   });
+  const runtimeListeners = [];
 
   sandbox.chrome = {
-    storage: { sync: { get: storageGet, set: storageSet } },
-    runtime: { sendMessage: sendMessageImpl }
+    storage: {
+      sync: { get: storageGet, set: storageSet },
+      local: { get: storageLocalGet, set: storageLocalSet }
+    },
+    runtime: {
+      lastError: null,
+      sendMessage: sendMessageImpl,
+      onMessage: {
+        addListener: (fn) => {
+          runtimeListeners.push(fn);
+        }
+      }
+    }
   };
 
   const context = vm.createContext(sandbox);
@@ -120,6 +145,7 @@ function setupPanelEnv(overrides = {}){
   RC.chips.findCardForHash = (hash)=> cardMap.get(hash) || null;
 
   new vm.Script(readScript('content/dom.js'), { filename: 'dom.js' }).runInContext(context);
+  new vm.Script(readScript('content/place-context.js'), { filename: 'place-context.js' }).runInContext(context);
 
   const toasts = [];
   const domApi = RC.dom;
@@ -133,6 +159,10 @@ function setupPanelEnv(overrides = {}){
   if (overrides.waitForCondition){
     domApi.waitForCondition = overrides.waitForCondition;
   }
+  if (overrides.placeContext) {
+    RC.placeContext = RC.placeContext || {};
+    Object.assign(RC.placeContext, overrides.placeContext);
+  }
 
   new vm.Script(readScript('content/panel.js'), { filename: 'panel.js' }).runInContext(context);
 
@@ -144,6 +174,8 @@ function setupPanelEnv(overrides = {}){
     dom: domApi,
     toasts,
     cardMap,
+    runtimeListeners,
+    storageState,
     reviews: RC.reviews,
     state: RC.state,
     flush: (ticks = 1)=> new Promise(resolve => {
@@ -158,7 +190,7 @@ function setupPanelEnv(overrides = {}){
 }
 
 describe('Panel Logic', () => {
-  test('Panel renders without context', async () => {
+  test('Panel renders options shortcut without inline context fields', async () => {
     const env = setupPanelEnv({
       sendMessageResponse: { soft: 'Wybrana delikatna', brief: 'Wybrana rzeczowa', proactive: 'Wybrana proaktywna' }
     });
@@ -175,8 +207,179 @@ describe('Panel Logic', () => {
 
     const wrap = window.document.querySelector('.rc-panel-wrap');
     expect(wrap).toBeTruthy();
-    expect(wrap.querySelector('.rc-context')).toBeNull();
+    expect(wrap.querySelector('.rc-context')).toBeFalsy();
+    expect(wrap.querySelector('#rc_place_type')).toBeFalsy();
+    expect(wrap.querySelector('#rc_place_name')).toBeFalsy();
+    expect(wrap.querySelector('#rc_options')).toBeTruthy();
     expect(wrap.querySelector('#rc_preview').textContent).toBe('Wybrana delikatna');
+  });
+
+  test('Options shortcut opens extension options page', async () => {
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (message?.type === 'OPEN_OPTIONS_PAGE') {
+          if (typeof cb === 'function') cb({ ok: true });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({ soft: 'A', brief: 'B', proactive: 'C' });
+        }
+      }
+    });
+    const { panelApi, window, reviews } = env;
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'card-options';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Testowa opinia';
+    reviews.extractRating = () => '5';
+
+    await panelApi.openForCard(card, null);
+    await env.flush(2);
+    window.document.querySelector('#rc_options').click();
+
+    expect(sentMessages.some(message => message?.type === 'OPEN_OPTIONS_PAGE')).toBe(true);
+  });
+
+  test('Panel includes detected place context in generate payload', async () => {
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      url: 'https://www.google.com/maps/place/Zielony+Piec/@50.0,19.0,17z/',
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({ soft: 'A', brief: 'B', proactive: 'C' });
+        }
+      }
+    });
+    const { panelApi, window, reviews } = env;
+    window.document.title = 'Zielony Piec · Restauracja - Google Maps';
+    const heading = window.document.createElement('h1');
+    heading.textContent = 'Zielony Piec';
+    window.document.body.appendChild(heading);
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'card-ctx';
+    card.textContent = 'Pierwotna opinia';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Swietna obsluga';
+    reviews.extractRating = () => '5';
+
+    await panelApi.openForCard(card, null);
+    await env.flush(2);
+
+    const generateMessage = sentMessages.find(message => message?.type === 'GENERATE_ALL');
+    expect(generateMessage).toBeTruthy();
+    expect(generateMessage.payload).toMatchObject({
+      rating: '5',
+      text: 'Swietna obsluga',
+      placeType: 'Restauracja',
+      placeName: 'Zielony Piec'
+    });
+    expect(generateMessage.payload.placeKey).toContain('place:zielony-piec');
+  });
+
+  test('Panel opens immediately on first click even when place context resolves slowly', async () => {
+    let resolveContext;
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({ soft: 'A', brief: 'B', proactive: 'C' });
+        }
+      },
+      placeContext: {
+        resolveContextForPage: () => new Promise((resolve) => {
+          resolveContext = resolve;
+        })
+      }
+    });
+    const { panelApi, window, reviews } = env;
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'slow-card';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Opinia testowa';
+    reviews.extractRating = () => '5';
+
+    const openPromise = panelApi.openForCard(card, null);
+    const wrap = window.document.querySelector('.rc-panel-wrap');
+    expect(wrap).toBeTruthy();
+    expect(window.document.querySelector('#rc_preview')).toBeTruthy();
+    expect(sentMessages.some(message => message?.type === 'GENERATE_ALL')).toBe(false);
+
+    resolveContext({
+      placeKey: 'place:test',
+      placeType: 'salon fryzjerski',
+      placeName: 'Nozyczki',
+      source: 'detected'
+    });
+    await openPromise;
+    await env.flush(2);
+
+    expect(sentMessages.some(message => message?.type === 'GENERATE_ALL')).toBe(true);
+  });
+
+  test('Saved options place context is reused on regenerate', async () => {
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      url: 'https://www.google.com/maps/place/Studio+Szkla/',
+      initialLocalStorage: {
+        rcBusinessContext: {
+          placeType: 'szklarstwo',
+          placeName: 'Studio Szkla Krakow',
+          source: 'options'
+        }
+      },
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({ soft: 'A', brief: 'B', proactive: 'C' });
+        }
+      }
+    });
+    const { panelApi, window, reviews, storageState } = env;
+    window.document.title = 'Studio Szkla - Google Maps';
+    const heading = window.document.createElement('h1');
+    heading.textContent = 'Studio Szkla';
+    window.document.body.appendChild(heading);
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'card-manual';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Dziekujemy';
+    reviews.extractRating = () => '4';
+
+    await panelApi.openForCard(card, null);
+    await env.flush(2);
+
+    expect(storageState.rcPlaceContextByKey).toBeUndefined();
+
+    window.document.querySelector('#rc_regen').click();
+    await env.flush(2);
+
+    const generateMessages = sentMessages.filter(message => message?.type === 'GENERATE_ALL');
+    expect(generateMessages.at(-1).payload).toMatchObject({
+      placeType: 'szklarstwo',
+      placeName: 'Studio Szkla Krakow',
+      rating: '4',
+      text: 'Dziekujemy'
+    });
   });
 
   test('CopyToClipboard uses navigator', async () => {
@@ -371,6 +574,129 @@ describe('Panel Logic', () => {
     expect(calledWith[0]).toBe('hash-success');
     expect(calledWith[1]).toBe(card);
     expect(calledWith[2].suppressWarnings).toBe(true);
+  });
+
+  test('AUTH_REQUIRED shows only login action and opens extension options', async () => {
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (message?.type === 'GET_AUTH_STATUS') {
+          if (typeof cb === 'function') cb({ profile: null });
+          return;
+        }
+        if (message?.type === 'OPEN_LOGIN_PAGE') {
+          if (typeof cb === 'function') cb({ ok: true });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({
+            error: 'Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.',
+            errorCode: 'AUTH_REQUIRED'
+          });
+        }
+      }
+    });
+    const { panelApi, window, reviews } = env;
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'auth-required';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Testowa opinia';
+    reviews.extractRating = () => '5';
+
+    await panelApi.openForCard(card, null);
+    await env.flush(2);
+
+    const err = window.document.querySelector('#rc_err');
+    const loginBtn = window.document.querySelector('#rc_login');
+    const copyBtn = window.document.querySelector('#rc_copy');
+    const regenBtn = window.document.querySelector('#rc_regen');
+    const upgradeBtn = window.document.querySelector('#rc_upgrade');
+    const closeBtn = window.document.querySelector('#rc_close');
+    const note = window.document.querySelector('.rc-note');
+    const preview = window.document.querySelector('#rc_preview');
+    expect(err.textContent).toBe('Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.');
+    expect(preview.textContent).toBe('Zaloguj sie, aby wygenerowac odpowiedz.');
+    expect(loginBtn).toBeTruthy();
+    expect(loginBtn.style.display).toBe('inline-flex');
+    expect(copyBtn.style.display).toBe('none');
+    expect(regenBtn.style.display).toBe('none');
+    expect(upgradeBtn.style.display).toBe('none');
+    expect(note.style.display).toBe('none');
+    expect(closeBtn.style.display).not.toBe('none');
+
+    loginBtn.click();
+
+    expect(sentMessages.some(message => message?.type === 'OPEN_LOGIN_PAGE')).toBe(true);
+  });
+
+  test('AUTH_STATUS_CHANGED restores panel actions and regenerates after login', async () => {
+    const sentMessages = [];
+    const env = setupPanelEnv({
+      sendMessage: (message, cb) => {
+        sentMessages.push(message);
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: null });
+          return;
+        }
+        if (message?.type === 'GET_AUTH_STATUS') {
+          if (typeof cb === 'function') cb({ profile: null });
+          return;
+        }
+        if (message?.type === 'GENERATE_ALL' && sentMessages.filter(item => item?.type === 'GENERATE_ALL').length === 1) {
+          if (typeof cb === 'function') {
+            cb({
+              error: 'Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.',
+              errorCode: 'AUTH_REQUIRED'
+            });
+          }
+          return;
+        }
+        if (message?.type === 'GENERATE_ALL') {
+          if (typeof cb === 'function') {
+            cb({
+              soft: 'Nowa delikatna',
+              brief: 'Nowa rzeczowa',
+              proactive: 'Nowa proaktywna',
+              quota: { type: 'usage', limit: 100, remaining: 99 }
+            });
+          }
+          return;
+        }
+        if (typeof cb === 'function') cb({ ok: true });
+      }
+    });
+    const { panelApi, window, reviews, runtimeListeners } = env;
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'auth-refresh';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Testowa opinia';
+    reviews.extractRating = () => '5';
+
+    await panelApi.openForCard(card, null);
+    await env.flush(2);
+
+    const panelEl = window.document.querySelector('.rc-panel');
+    expect(panelEl.dataset.rcAuthRequired).toBe('true');
+    expect(window.document.querySelector('#rc_login').style.display).toBe('inline-flex');
+
+    runtimeListeners.forEach(listener => listener({
+      type: 'AUTH_STATUS_CHANGED',
+      reason: 'login',
+      profile: { email: 'owner@example.com' },
+      quota: { type: 'usage', limit: 100, remaining: 99 }
+    }));
+    await env.flush(2);
+
+    expect(panelEl.dataset.rcAuthRequired).toBe('false');
+    expect(window.document.querySelector('#rc_login').style.display).toBe('none');
+    expect(window.document.querySelector('#rc_copy').style.display).toBe('inline-flex');
+    expect(window.document.querySelector('#rc_preview').textContent).toBe('Nowa delikatna');
+    expect(sentMessages.filter(message => message?.type === 'GENERATE_ALL')).toHaveLength(2);
   });
 
   test('GenerateReplies shows timeout error when worker stays silent', async () => {

@@ -1,6 +1,6 @@
 ﻿(function initPanel(global) {
   const RC = global.RC;
-  const { state, dom, reviews, chips } = RC;
+  const { state, dom, reviews, chips, placeContext: placeContextApi = {} } = RC;
   const panelApi = RC.panel = RC.panel || {};
 
   panelApi.openForCard = async function openForCard(card, anchor) {
@@ -149,7 +149,30 @@
 
     try {
       if (!wrap.isConnected || state.currentPanel !== wrap) return;
-      renderMainPanel(panelEl, card, reviewSource);
+      const emptyPlaceContext = {
+        placeKey: '',
+        placeName: '',
+        placeType: '',
+        detectedPlaceName: '',
+        detectedPlaceType: '',
+        source: 'none'
+      };
+      renderMainPanel(panelEl, card, reviewSource, emptyPlaceContext, { autoGenerate: false });
+      let resolvedPlaceContext = emptyPlaceContext;
+      if (typeof placeContextApi.resolveContextForPage === 'function') {
+        try {
+          resolvedPlaceContext = await placeContextApi.resolveContextForPage();
+        } catch (contextErr) {
+          console.warn('[RC] Nie udalo sie odczytac kontekstu miejsca', contextErr);
+        }
+      }
+      if (!wrap.isConnected || state.currentPanel !== wrap || !panelEl.isConnected) return;
+      applyPlaceContextToPanel(panelEl, resolvedPlaceContext, { overwrite: true });
+      panelApi.generateReplies(panelEl, card, panelEl._rcVariants || {
+        soft: '',
+        brief: '',
+        proactive: ''
+      }, false, reviewSource);
     } catch (err) {
       console.error('[RC] Nie udalo sie otworzyc panelu', err);
       if (wrap.isConnected) {
@@ -208,6 +231,7 @@
 
     const showUpgradeCta = () => {
       if (!upgradeUrl) return;
+      if (panelEl.dataset.rcAuthRequired === 'true') return;
       if (upgradeBtn) {
         upgradeBtn.dataset.url = upgradeUrl;
         upgradeBtn.style.display = 'inline-flex';
@@ -258,20 +282,173 @@
     box.textContent = 'Limit darmowych odpowiedzi zostal wykorzystany.';
     showUpgradeCta();
   }
-  function renderMainPanel(panelEl, card, reviewSource) {
+
+  function setAuthRequiredMode(panelEl, required) {
+    if (!panelEl) return;
+    panelEl.dataset.rcAuthRequired = required ? 'true' : 'false';
+    const loginBtn = panelEl.querySelector('#rc_login');
+    const copyBtn = panelEl.querySelector('#rc_copy');
+    const regenBtn = panelEl.querySelector('#rc_regen');
+    const upgradeBtn = panelEl.querySelector('#rc_upgrade');
+    const note = panelEl.querySelector('.rc-note');
+    if (loginBtn) loginBtn.style.display = required ? 'inline-flex' : 'none';
+    if (copyBtn) copyBtn.style.display = required ? 'none' : 'inline-flex';
+    if (regenBtn) regenBtn.style.display = required ? 'none' : 'inline-flex';
+    if (note) note.style.display = required ? 'none' : '';
+    if (required && upgradeBtn) upgradeBtn.style.display = 'none';
+  }
+
+  function requestLoginPage(panelEl) {
+    const sendMessage = chrome?.runtime?.sendMessage;
+    if (typeof sendMessage !== 'function') {
+      const err = panelEl?.querySelector?.('#rc_err');
+      if (err) err.textContent = 'Nie moge otworzyc logowania z tej strony. Otworz opcje rozszerzenia.';
+      return;
+    }
+    sendMessage({ type: 'OPEN_LOGIN_PAGE' }, (resp) => {
+      const runtimeError = chrome?.runtime?.lastError || null;
+      if (!panelEl?.isConnected || (!runtimeError && !(resp && resp.error))) return;
+      const err = panelEl.querySelector('#rc_err');
+      if (err) {
+        err.textContent = runtimeError?.message || resp?.error || 'Nie udalo sie otworzyc logowania.';
+      }
+    });
+  }
+
+  function requestOptionsPage(panelEl) {
+    const sendMessage = chrome?.runtime?.sendMessage;
+    if (typeof sendMessage !== 'function') {
+      const err = panelEl?.querySelector?.('#rc_err');
+      if (err) err.textContent = 'Nie moge otworzyc opcji z tej strony. Otworz opcje rozszerzenia recznie.';
+      return;
+    }
+    sendMessage({ type: 'OPEN_OPTIONS_PAGE' }, (resp) => {
+      const runtimeError = chrome?.runtime?.lastError || null;
+      if (!panelEl?.isConnected || (!runtimeError && !(resp && resp.error))) return;
+      const err = panelEl.querySelector('#rc_err');
+      if (err) {
+        err.textContent = runtimeError?.message || resp?.error || 'Nie udalo sie otworzyc opcji.';
+      }
+    });
+  }
+
+  function refreshLoginAction(panelEl) {
+    const sendMessage = chrome?.runtime?.sendMessage;
+    if (typeof sendMessage !== 'function') return;
+    sendMessage({ type: 'GET_AUTH_STATUS' }, (resp) => {
+      if (!panelEl?.isConnected || chrome?.runtime?.lastError) return;
+      setAuthRequiredMode(panelEl, !(resp && resp.profile && resp.profile.email));
+      panelEl.parentElement?.reposition?.();
+    });
+  }
+
+  function currentPanelElement() {
+    const wrap = state.currentPanel;
+    if (wrap?.querySelector) {
+      const panelEl = wrap.querySelector(`.${state.panelId}`);
+      if (panelEl) return panelEl;
+    }
+    return document.querySelector(`.${state.panelId}`);
+  }
+
+  function handleAuthStatusChanged(message) {
+    if (!message || message.type !== 'AUTH_STATUS_CHANGED') return;
+    const panelEl = currentPanelElement();
+    if (!panelEl?.isConnected) return;
+
+    const wasAuthRequired = panelEl.dataset.rcAuthRequired === 'true';
+    const loggedIn = Boolean(message.profile && message.profile.email);
+    const errorBox = panelEl.querySelector('#rc_err');
+    const preview = panelEl.querySelector('#rc_preview');
+
+    setAuthRequiredMode(panelEl, !loggedIn);
+    updateQuotaInfo(panelEl, message.quota || null);
+
+    if (loggedIn) {
+      if (errorBox) errorBox.textContent = '';
+      if (wasAuthRequired && typeof panelEl._rcGenerateAfterLogin === 'function') {
+        panelEl._rcGenerateAfterLogin();
+      } else if (wasAuthRequired && preview) {
+        preview.textContent = 'Zalogowano. Kliknij Regeneruj, aby wygenerowac odpowiedz.';
+      }
+    } else {
+      if (errorBox) errorBox.textContent = 'Wylogowano. Zaloguj sie, aby wygenerowac odpowiedz.';
+      if (preview) preview.textContent = 'Zaloguj sie, aby wygenerowac odpowiedz.';
+    }
+
+    panelEl.parentElement?.reposition?.();
+  }
+
+  if (!panelApi._authStatusListenerInstalled
+    && typeof chrome !== 'undefined'
+    && chrome?.runtime?.onMessage
+    && typeof chrome.runtime.onMessage.addListener === 'function') {
+    chrome.runtime.onMessage.addListener((message) => {
+      handleAuthStatusChanged(message);
+    });
+    panelApi._authStatusListenerInstalled = true;
+  }
+
+  function normalizePanelPlaceContext(input = {}) {
+    if (typeof placeContextApi.normalizeContext === 'function') {
+      return placeContextApi.normalizeContext(input);
+    }
+    return {
+      placeType: (input.placeType || '').trim(),
+      placeName: (input.placeName || '').trim()
+    };
+  }
+
+  function getPanelPlaceContext(panelEl) {
+    return normalizePanelPlaceContext(panelEl?._rcPlaceContext || {});
+  }
+
+  function applyPlaceContextToPanel(panelEl, contextMeta, options = {}) {
+    if (!panelEl || !panelEl.isConnected || !contextMeta) return;
+    panelEl._rcPlaceContext = normalizePanelPlaceContext(contextMeta);
+    if (contextMeta.placeKey) panelEl.dataset.rcPlaceKey = contextMeta.placeKey;
+  }
+
+  async function refreshPlaceContextForPanel(panelEl) {
+    if (!panelEl?.isConnected || typeof placeContextApi.resolveContextForPage !== 'function') return;
+    try {
+      const resolvedPlaceContext = await placeContextApi.resolveContextForPage({ forceRefresh: true });
+      applyPlaceContextToPanel(panelEl, resolvedPlaceContext);
+    } catch (contextErr) {
+      console.warn('[RC] Nie udalo sie odswiezyc kontekstu miejsca', contextErr);
+    }
+  }
+
+  function renderMainPanel(panelEl, card, reviewSource, initialPlaceContext, options = {}) {
     if (!panelEl.parentElement || !panelEl.parentElement.isConnected) return;
     const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
     const reviewText = (source.text || '').trim();
     const reviewRating = (source.rating || '').toString().trim();
     const variants = { soft: '', brief: '', proactive: '' };
+    panelEl._rcVariants = variants;
+    const placeMeta = initialPlaceContext || {
+      placeKey: '',
+      placeName: '',
+      placeType: '',
+      detectedPlaceName: '',
+      detectedPlaceType: '',
+      source: 'none'
+    };
 
     panelEl.innerHTML = `
       <div class="rc-head">
         <div class="rc-title"><span class="rc-dot"></span> Wybierz styl i sprawdz odpowiedz</div>
-        <div class="rc-seg" id="rc_seg">
-          <button data-style="soft" class="active">Delikatna</button>
-          <button data-style="brief">Rzeczowa</button>
-          <button data-style="proactive">Proaktywna</button>
+        <div class="rc-head-actions">
+          <div class="rc-seg" id="rc_seg">
+            <button data-style="soft" class="active">Delikatna</button>
+            <button data-style="brief">Rzeczowa</button>
+            <button data-style="proactive">Proaktywna</button>
+          </div>
+          <button id="rc_options" class="rc-icon-btn" type="button" title="Otworz opcje" aria-label="Otworz opcje">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A7.8 7.8 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"></path>
+            </svg>
+          </button>
         </div>
       </div>
       <div class="rc-preview" id="rc_preview"><div style="display:flex;align-items:center;gap:8px"><div class="rc-spinner"></div><span>Generuje...</span></div></div>
@@ -279,6 +456,7 @@
       <div class="rc-actions">
         <button id="rc_copy" class="rc-primary">Skopiuj wygenerowana odpowiedz</button>
         <button id="rc_regen" class="rc-secondary">Regeneruj</button>
+        <button id="rc_login" class="rc-secondary rc-login" style="display:none">Zaloguj sie</button>
         <button id="rc_upgrade" class="rc-primary rc-upgrade" style="display:none">Kup abonament</button>
         <button id="rc_close" class="rc-secondary">Zamknij</button>
         <span class="rc-note">Kopiuje do schowka i otwiera okno odpowiedzi.</span>
@@ -287,6 +465,9 @@
     `;
 
     const seg = panelEl.querySelector('#rc_seg');
+    panelEl.dataset.rcPlaceKey = placeMeta.placeKey || '';
+    panelEl._rcPlaceContext = normalizePanelPlaceContext(placeMeta);
+
     seg.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-style]');
       if (!button) return;
@@ -313,12 +494,30 @@
       await panelApi.openReplyPopup(targetHash, card, { suppressWarnings: true });
     };
 
-    panelEl.querySelector('#rc_regen').onclick = () => {
+    const regenerateFromCurrentCard = async () => {
       panelEl.querySelector('#rc_err').textContent = '';
-      panelApi.generateReplies(panelEl, card, variants, true, { text: reviews.extractText(card), rating: reviews.extractRating(card) });
+      await refreshPlaceContextForPanel(panelEl);
+      panelApi.generateReplies(panelEl, card, variants, true, {
+        text: reviews.extractText(card),
+        rating: reviews.extractRating(card)
+      });
+    };
+    panelEl._rcGenerateAfterLogin = regenerateFromCurrentCard;
+    panelEl.querySelector('#rc_regen').onclick = regenerateFromCurrentCard;
+
+    panelEl.querySelector('#rc_close').onclick = () => {
+      dom.closeCurrentPanel();
     };
 
-    panelEl.querySelector('#rc_close').onclick = () => dom.closeCurrentPanel();
+    const optionsBtn = panelEl.querySelector('#rc_options');
+    if (optionsBtn) {
+      optionsBtn.addEventListener('click', () => requestOptionsPage(panelEl));
+    }
+
+    const loginBtn = panelEl.querySelector('#rc_login');
+    if (loginBtn) {
+      loginBtn.addEventListener('click', () => requestLoginPage(panelEl));
+    }
 
     const upgradeBtn = panelEl.querySelector('#rc_upgrade');
     if (upgradeBtn) {
@@ -331,11 +530,14 @@
       });
     }
 
-    panelApi.generateReplies(panelEl, card, variants, false, { text: reviewText, rating: reviewRating });
+    if (options.autoGenerate !== false) {
+      panelApi.generateReplies(panelEl, card, variants, false, { text: reviewText, rating: reviewRating });
+    }
     panelEl.parentElement?.reposition?.();
     chrome.runtime.sendMessage({ type: 'GET_QUOTA_STATUS' }, (resp) => {
       if (panelEl.isConnected) updateQuotaInfo(panelEl, resp && resp.quota ? resp.quota : null);
     });
+    refreshLoginAction(panelEl);
   }
 
   const GENERATE_TIMEOUT_MS = 22000;
@@ -375,9 +577,13 @@
     };
 
     const source = reviewSource || { text: reviews.extractText(card), rating: reviews.extractRating(card) };
+    const contextValues = getPanelPlaceContext(panelEl);
     const payload = {
       text: (source.text || '').trim(),
-      rating: (source.rating || '').toString().trim()
+      rating: (source.rating || '').toString().trim(),
+      placeKey: panelEl.dataset.rcPlaceKey || '',
+      placeType: contextValues.placeType,
+      placeName: contextValues.placeName
     };
     console.log('[RC] payload wysylany do SW:', { ...payload });
 
@@ -415,6 +621,8 @@
           }
           if (resp?.errorCode === 'AUTH_REQUIRED') {
             if (errorBox) errorBox.textContent = errorMessage;
+            if (preview) preview.textContent = 'Zaloguj sie, aby wygenerowac odpowiedz.';
+            setAuthRequiredMode(panelEl, true);
             panelEl.parentElement?.reposition?.();
             return;
           }
@@ -435,6 +643,7 @@
         const active = seg.querySelector('.active')?.dataset.style || 'soft';
         preview.textContent = variants[active] || '...';
         if (errorBox) errorBox.textContent = '';
+        setAuthRequiredMode(panelEl, false);
         panelEl.parentElement?.reposition?.();
       });
     } catch (err) {

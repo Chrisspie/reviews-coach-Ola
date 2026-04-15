@@ -1,7 +1,0 @@
-{
-    "proxyBase": "http://localhost:3000",
-    "proxyBase1": "https://reviewscoach.azurewebsites.net",
-    "upgradeUrl": "http://localhost:5173/#plany",
-    "googleClientId": "519901113833-gol3md6v7uh2rs2rgg87ctmk5j1ruclv.apps.googleusercontent.com",
-    "licenseKey": ""
-}

@@ -31,6 +31,8 @@ function createStorageArea() {
 
 let onMessageHandler = null;
 let createdTabs = [];
+let sentTabMessages = [];
+let openedOptionsCount = 0;
 
 // global.crypto = webcrypto;
 const sessionArea = createStorageArea();
@@ -42,11 +44,18 @@ global.chrome = {
     lastError: null,
     getURL: fileName => fileName,
     getManifest: () => ({ version: '1.0.0' }),
+    openOptionsPage: async () => {
+      openedOptionsCount += 1;
+    },
     onMessage: { addListener: (fn) => { onMessageHandler = fn; } }
   },
   tabs: {
     create: ({ url }) => {
       createdTabs.push(url);
+    },
+    query: async () => [{ id: 101 }, { id: 102 }],
+    sendMessage: async (tabId, message) => {
+      sentTabMessages.push({ tabId, message });
     }
   },
   storage: {
@@ -71,6 +80,8 @@ describe('Service Worker Logic', () => {
     await sessionArea.clear();
     await localArea.clear();
     createdTabs = [];
+    sentTabMessages = [];
+    openedOptionsCount = 0;
     global.fetch = async () => { throw new Error('fetch not mocked'); };
   });
 
@@ -111,6 +122,135 @@ describe('Service Worker Logic', () => {
     expect(response).toEqual({ error: 'Brak danych opinii do wygenerowania.' });
   });
 
+  test('OPEN_LOGIN_PAGE opens the extension options page', async () => {
+    let response = null;
+    const listenerResult = onMessageHandler({ type: 'OPEN_LOGIN_PAGE' }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await Promise.resolve();
+
+    expect(response).toEqual({ ok: true });
+    expect(openedOptionsCount).toBe(1);
+    expect(createdTabs).toEqual([]);
+  });
+
+  test('OPEN_OPTIONS_PAGE opens the extension options page', async () => {
+    let response = null;
+    const listenerResult = onMessageHandler({ type: 'OPEN_OPTIONS_PAGE' }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await Promise.resolve();
+
+    expect(response).toEqual({ ok: true });
+    expect(openedOptionsCount).toBe(1);
+    expect(createdTabs).toEqual([]);
+  });
+
+  test('START_GOOGLE_LOGIN returns account profile and quota for options page', async () => {
+    const sessionBodies = [];
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/session') {
+        const body = JSON.parse(options.body || '{}');
+        sessionBodies.push(body);
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            token: 'jwt-token',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+            deviceToken: 'fresh-device-token',
+            license: { id: 'license-1' },
+            profile: {
+              email: 'owner@example.com',
+              sub: 'user-1',
+              plan: 'pro'
+            },
+            quota: {
+              type: 'usage',
+              limit: 100,
+              remaining: 42,
+              expiresAt: '2099-02-01T00:00:00.000Z'
+            }
+          })
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const listenerResult = onMessageHandler({ type: 'START_GOOGLE_LOGIN' }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(sessionBodies).toHaveLength(1);
+    expect(sessionBodies[0].idToken).toBe('test-id-token');
+    expect(response).toMatchObject({
+      ok: true,
+      profile: {
+        email: 'owner@example.com',
+        sub: 'user-1',
+        plan: 'pro',
+        licenseId: 'license-1'
+      },
+      quota: {
+        type: 'usage',
+        limit: 100,
+        remaining: 42,
+        expiresAt: '2099-02-01T00:00:00.000Z'
+      }
+    });
+
+    let status = null;
+    onMessageHandler({ type: 'GET_AUTH_STATUS' }, {}, (payload) => {
+      status = payload;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(status).toMatchObject({
+      profile: { email: 'owner@example.com', plan: 'pro', licenseId: 'license-1' },
+      quota: { remaining: 42 }
+    });
+    expect(sentTabMessages).toHaveLength(2);
+    expect(sentTabMessages.map(item => item.tabId)).toEqual([101, 102]);
+    for (const item of sentTabMessages) {
+      expect(item.message).toMatchObject({
+        type: 'AUTH_STATUS_CHANGED',
+        reason: 'login',
+        profile: {
+          email: 'owner@example.com',
+          sub: 'user-1',
+          plan: 'pro',
+          licenseId: 'license-1'
+        },
+        quota: {
+          type: 'usage',
+          limit: 100,
+          remaining: 42,
+          limitSeconds: null,
+          remainingSeconds: null,
+          expiresAt: '2099-02-01T00:00:00.000Z',
+          upgradeUrl: ''
+        }
+      });
+    }
+  });
+
   test('fetchWithTimeout rejects with a controlled timeout message', async () => {
     global.fetch = async (_url, init = {}) => new Promise((_, reject) => {
       init.signal?.addEventListener('abort', () => {
@@ -133,7 +273,7 @@ describe('Service Worker Logic', () => {
     let generateBody = null;
 
     global.fetch = async (url, options = {}) => {
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({
@@ -246,7 +386,7 @@ describe('Service Worker Logic', () => {
     });
 
     global.fetch = async (url, options = {}) => {
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({
@@ -305,6 +445,7 @@ describe('Service Worker Logic', () => {
     const prompt = generateBody.contents[0].parts[0].text;
 
     expect(prompt).toContain('Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.');
+    expect(prompt).toContain('Pisz naturalnie, uprzejmie i po ludzku, jak odpowiedź publikowana w imieniu firmy lub miejsca.');
     expect(prompt).toContain('Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.');
     expect(prompt).toContain('Zwróć tylko poprawny JSON bez dodatkowych komentarzy.');
     expect(prompt).toContain('Dziękujemy za opinię,');
@@ -314,6 +455,10 @@ describe('Service Worker Logic', () => {
     expect(prompt).toContain('Treść opinii:\nŚwietna obsługa i pyszne pierogi.');
     expect(prompt).not.toContain('Dzień dobry');
     expect(prompt).not.toContain('Dzien dobry');
+    expect(prompt).toContain('Nie zakladaj struktury firmy, roli autora odpowiedzi ani tego, ze chodzi o restauracje, chyba ze wynika to z kontekstu miejsca albo z samej opinii.');
+    expect(prompt).toContain('Jesli uzywasz imienia recenzenta albo formy typu Panie Pawle / Pani Katarzyno, umiesc je wylacznie na samym poczatku odpowiedzi albo na poczatku pierwszego zdania.');
+    expect(prompt).toContain('Wariant brief ma miec maksymalnie 2 zdania i maksymalnie 220 znakow.');
+    expect(prompt).toContain('Zwroc tylko poprawny JSON bez markdown, backtickow, blokow kodu, komentarzy i bez zadnego tekstu przed albo po JSON.');
     expect(response._prompt).toBe(prompt);
   });
 
@@ -331,7 +476,7 @@ describe('Service Worker Logic', () => {
     });
 
     global.fetch = async (url, options = {}) => {
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({
@@ -386,11 +531,97 @@ describe('Service Worker Logic', () => {
     const prompt = generateBody.contents[0].parts[0].text;
 
     expect(prompt).toContain('Ocena klienta: 1/5.');
-    expect(prompt).toContain('Klient jest niezadowolony: przeproś, uznaj problem i zaproponuj dalszy kontakt przez profil firmy.');
-    expect(prompt).toContain('Dostosuj ogólny ton: empatyczny i spokojny, zachęcający do kontaktu przez profil');
-    expect(prompt).toContain('Jeśli opinia zawiera problem, w każdym wariancie okaż zrozumienie i odnieś się do problemu.');
+    expect(prompt).toContain('Klient jest niezadowolony: okaż zrozumienie, odnieś się do problemu i dobierz strategię odpowiedzi bez zakładania winy firmy.');
+    expect(prompt).toContain('Dostosuj ogólny ton: empatyczny, spokojny i profesjonalny');
+    expect(prompt).toContain('Warianty nie mogą różnić się tylko pojedynczymi słowami ani samym tonem; mają różnić się także strategią odpowiedzi.');
+    expect(prompt).toContain('soft ma przede wszystkim okazać zrozumienie i złagodzić napięcie,');
+    expect(prompt).toContain('brief ma przede wszystkim odpowiedzieć krótko i rzeczowo,');
+    expect(prompt).toContain('proactive ma przede wszystkim pokazać gotowość do dalszej rozmowy albo doprecyzowania.');
+    expect(prompt).toContain('Każdy wariant może zakończyć się neutralnym zaproszeniem do kontaktu w razie pytań, ale zaproszenie do kontaktu nie może być jedyną treścią odpowiedzi.');
+    expect(prompt).toContain('Jesli opinia jest negatywna albo mieszana, trzy warianty maja roznic sie nie tylko stylem, ale tez glownym ruchem odpowiedzi: soft lagodzi napiecie, brief odpowiada rzeczowo, proactive najmocniej otwiera rozmowe.');
     expect(prompt).toContain('Jedzenie było zimne i długo czekaliśmy.');
     expect(prompt).toContain('Zapraszamy do kontaktu przez dane dostępne na profilu firmy.');
+  });
+
+  test('GENERATE_ALL keeps rating and review text while adding place context to the prompt', async () => {
+    let generateBody = null;
+    let resolveGenerateRequest;
+    const generateRequestSeen = new Promise(resolve => { resolveGenerateRequest = resolve; });
+
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        generateBody = JSON.parse(options.body || '{}');
+        resolveGenerateRequest();
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: () => null
+          },
+          text: async () => JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: '{"soft":"soft reply","brief":"brief reply","proactive":"proactive reply"}'
+                    }
+                  ]
+                }
+              }
+            ]
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: {
+        rating: '5',
+        text: 'Makaron byl swietny i obsluga bardzo mila.',
+        placeType: 'restauracja wloska',
+        placeName: 'Trattoria Verde'
+      }
+    }, {}, () => {});
+
+    expect(listenerResult).toBe(true);
+    await generateRequestSeen;
+
+    const prompt = generateBody.contents[0].parts[0].text;
+
+    expect(prompt).toContain('Ocena klienta: 5/5.');
+    expect(prompt).toContain('Makaron byl swietny i obsluga bardzo mila.');
+    expect(prompt).toContain('Typ dzialalnosci miejsca: restauracja wloska.');
+    expect(prompt).toContain('Nazwa firmy: "Trattoria Verde". To nazwa wlasna firmy lub miejsca.');
+    expect(prompt).toContain('Instrukcje dotyczace kontekstu miejsca:');
+    expect(prompt).toContain('Priorytetowe doprecyzowania:');
   });
 
   test('OPEN_UPGRADE_PAGE opens Stripe checkout directly for logged-in users', async () => {
@@ -403,7 +634,7 @@ describe('Service Worker Logic', () => {
     });
 
     global.fetch = async (url, options = {}) => {
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({
@@ -456,7 +687,7 @@ describe('Service Worker Logic', () => {
           })
         };
       }
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({ proxyBase: 'https://proxy.local' })
@@ -490,7 +721,7 @@ describe('Service Worker Logic', () => {
     });
 
     global.fetch = async (url) => {
-      if (url === 'config.json' || url === 'config.default.json') {
+      if (url === 'config.json') {
         return {
           ok: true,
           text: async () => JSON.stringify({
@@ -526,5 +757,162 @@ describe('Service Worker Logic', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(response).toEqual({ error: 'Sprobuj ponownie pozniej.' });
+  });
+
+  test('GENERATE_ALL masks upstream high demand errors with a friendly overload message', async () => {
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    global.fetch = async (url) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: {
+            get: () => null
+          },
+          text: async () => JSON.stringify({
+            error: {
+              message: 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'
+            }
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: { rating: '5', text: 'Super obsluga' }
+    }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 1300));
+
+    expect(response).toEqual({
+      error: 'Serwer jest obecnie obciazony. Sprobuj ponownie za chwile.',
+      errorCode: undefined,
+      freeLimit: undefined,
+      quota: null,
+      upgradeUrl: ''
+    });
+  });
+
+  test('GENERATE_ALL retries once after upstream high demand and succeeds when the retry works', async () => {
+    await sessionArea.set({
+      proxySession: {
+        token: 'jwt-token',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      }
+    });
+
+    let generateCalls = 0;
+    global.fetch = async (url) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/gemini/generate') {
+        generateCalls++;
+        if (generateCalls === 1) {
+          return {
+            ok: false,
+            status: 503,
+            statusText: 'Service Unavailable',
+            headers: {
+              get: () => null
+            },
+            text: async () => JSON.stringify({
+              error: {
+                message: 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.'
+              }
+            })
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: () => null
+          },
+          text: async () => JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: '{"soft":"soft retry","brief":"brief retry","proactive":"proactive retry"}'
+                    }
+                  ]
+                }
+              }
+            ]
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/log') {
+        return {
+          ok: true,
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let response = null;
+    const listenerResult = onMessageHandler({
+      type: 'GENERATE_ALL',
+      payload: { rating: '5', text: 'Super obsluga' }
+    }, {}, (payload) => {
+      response = payload;
+    });
+
+    expect(listenerResult).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 1300));
+
+    expect(generateCalls).toBe(2);
+    expect(response).toEqual({
+      soft: 'soft retry',
+      brief: 'brief retry',
+      proactive: 'proactive retry',
+      _prompt: expect.any(String),
+      quota: null
+    });
   });
 });
