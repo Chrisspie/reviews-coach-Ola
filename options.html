@@ -30,6 +30,7 @@
     .save-status { min-height: 20px; margin: 12px 0 0; font-size: 13px; }
     .upgrade-status { min-height: 20px; margin: 10px 0 0; font-size: 13px; }
     .auth-only { display: none; }
+    .guest-only { display: block; }
     @media (max-width: 640px) {
       body { padding: 16px 12px 32px; }
       main { padding: 22px; }
@@ -46,6 +47,7 @@
   <section class="hint">
     <h2 class="auth-only">Konto</h2>
     <p id="auth-status" class="muted auth-only">(wczytywanie...)</p>
+    <p id="logged-out-help" class="muted guest-only">Zaloguj sie kontem Google, aby skonfigurowac dzialanie rozszerzenia.</p>
     <dl class="auth-only">
       <dt>Email</dt>
       <dd id="account-email">-</dd>

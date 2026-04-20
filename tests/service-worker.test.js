@@ -122,6 +122,46 @@ describe('Service Worker Logic', () => {
     expect(response).toEqual({ error: 'Brak danych opinii do wygenerowania.' });
   });
 
+  test('GENERATE_ALL while logged out returns auth guidance without console error', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      global.fetch = async (url) => {
+        if (url === 'config.json') {
+          return {
+            ok: true,
+            text: async () => JSON.stringify({
+              proxyBase: 'https://proxy.local',
+              googleClientId: 'client-id.apps.googleusercontent.com'
+            })
+          };
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      };
+
+      let response = null;
+      const listenerResult = onMessageHandler({
+        type: 'GENERATE_ALL',
+        payload: { text: 'Super obsluga', rating: '5' }
+      }, {}, (payload) => {
+        response = payload;
+      });
+
+      expect(listenerResult).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(response).toEqual({
+        error: 'Sesja wygasla. Zaloguj sie ponownie w rozszerzeniu.',
+        errorCode: 'AUTH_REQUIRED'
+      });
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
   test('OPEN_LOGIN_PAGE opens the extension options page', async () => {
     let response = null;
     const listenerResult = onMessageHandler({ type: 'OPEN_LOGIN_PAGE' }, {}, (payload) => {
@@ -248,6 +288,45 @@ describe('Service Worker Logic', () => {
           upgradeUrl: ''
         }
       });
+    }
+  });
+
+  test('START_GOOGLE_LOGIN cancellation returns guidance without console error', async () => {
+    const originalLaunchWebAuthFlow = chrome.identity.launchWebAuthFlow;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      chrome.identity.launchWebAuthFlow = (_options, cb) => {
+        chrome.runtime.lastError = { message: 'The user did not approve access.' };
+        cb(null);
+        chrome.runtime.lastError = null;
+      };
+      global.fetch = async (url) => {
+        if (url === 'config.json') {
+          return {
+            ok: true,
+            text: async () => JSON.stringify({
+              proxyBase: 'https://proxy.local',
+              googleClientId: 'client-id.apps.googleusercontent.com'
+            })
+          };
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      };
+
+      let response = null;
+      const result = onMessageHandler({ type: 'START_GOOGLE_LOGIN' }, {}, (payload) => {
+        response = payload;
+      });
+
+      expect(result).toBe(true);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(response).toEqual({ error: 'Logowanie anulowane.' });
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      chrome.identity.launchWebAuthFlow = originalLaunchWebAuthFlow;
+      chrome.runtime.lastError = null;
+      errorSpy.mockRestore();
     }
   });
 
@@ -668,7 +747,9 @@ describe('Service Worker Logic', () => {
   });
 
   test('OPEN_UPGRADE_PAGE returns Google login guidance for license-only sessions', async () => {
-    await sessionArea.set({
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await sessionArea.set({
       proxySession: {
         token: 'cached-license-jwt',
         proxyBase: 'https://proxy.local',
@@ -708,7 +789,11 @@ describe('Service Worker Logic', () => {
       error: 'Aby kupić abonament, zaloguj się kontem Google w rozszerzeniu.',
       code: 'GOOGLE_LOGIN_REQUIRED'
     });
+    expect(errorSpy).not.toHaveBeenCalled();
     expect(createdTabs).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   test('GENERATE_ALL masks raw fetch failures with a friendly retry message', async () => {

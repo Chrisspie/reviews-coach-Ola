@@ -13,6 +13,7 @@
   const contextSaveStatusEl = document.getElementById('context-save-status');
   const upgradeStatusEl = document.getElementById('upgrade-status');
   const authOnlyEls = Array.from(document.querySelectorAll('.auth-only'));
+  const guestOnlyEls = Array.from(document.querySelectorAll('.guest-only'));
   const BUSINESS_CONTEXT_KEY = 'rcBusinessContext';
   const MAX_PLACE_TYPE_CHARS = 80;
   const MAX_PLACE_NAME_CHARS = 120;
@@ -21,9 +22,23 @@
     if (el) el.textContent = text || '-';
   }
 
+  function visibleDisplayFor(el){
+    const configuredDisplay = el?.getAttribute?.('data-auth-display');
+    if (configuredDisplay) return configuredDisplay;
+    const tagName = (el?.tagName || '').toUpperCase();
+    if (tagName === 'BUTTON') return 'inline-flex';
+    if (tagName === 'SPAN' || tagName === 'A') return 'inline';
+    if (tagName === 'TR') return 'table-row';
+    if (tagName === 'TD' || tagName === 'TH') return 'table-cell';
+    return 'block';
+  }
+
   function setAuthenticatedUiVisible(visible){
     authOnlyEls.forEach((el) => {
-      el.style.display = visible ? '' : 'none';
+      el.style.display = visible ? visibleDisplayFor(el) : 'none';
+    });
+    guestOnlyEls.forEach((el) => {
+      el.style.display = visible ? 'none' : visibleDisplayFor(el);
     });
   }
 

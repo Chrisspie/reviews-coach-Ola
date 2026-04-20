@@ -589,7 +589,6 @@
 
     timeoutId = window.setTimeout(() => {
       if (!settle() || !panelEl.isConnected) return;
-      console.warn('[RC] GENERATE_ALL timed out (no SW response).');
       showErrorFallback('Brak odpowiedzi z uslugi generowania. Sprobuj ponownie.');
     }, GENERATE_TIMEOUT_MS);
 

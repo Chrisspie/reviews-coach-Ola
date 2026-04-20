@@ -26,11 +26,19 @@ const MAPS_TAB_URLS = ['https://*.google.com/maps/*', 'https://*.google.pl/maps/
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
 const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez Google.';
 const GOOGLE_LOGIN_REQUIRED_CODE = 'GOOGLE_LOGIN_REQUIRED';
+const LOGIN_CANCELLED_CODE = 'LOGIN_CANCELLED';
 const AUTH_STATUS_CHANGED_MESSAGE = 'AUTH_STATUS_CHANGED';
 const FRIENDLY_RETRY_MESSAGE = 'Sprobuj ponownie pozniej.';
 const FRIENDLY_UPGRADE_MESSAGE = 'Nie udalo sie otworzyc platnosci. Sprobuj ponownie pozniej.';
 const FRIENDLY_OVERLOAD_MESSAGE = 'Serwer jest obecnie obciazony. Sprobuj ponownie za chwile.';
 const OVERLOAD_RETRY_DELAY_MS = 1200;
+const EXPECTED_USER_STATE_CODES = new Set([
+  AUTH_REQUIRED_CODE,
+  GOOGLE_LOGIN_REQUIRED_CODE,
+  LOGIN_CANCELLED_CODE,
+  'FREE_LIMIT_REACHED',
+  'SUBSCRIPTION_REQUIRED'
+]);
 
 let staticConfigPromise = null;
 let quotaState = null;
@@ -337,7 +345,9 @@ async function getAuthStatusPayload(options = {}) {
         updateQuotaState(quota);
       }
     } catch (err) {
-      console.warn('[RC] Nie udalo sie odswiezyc statusu konta', err);
+      if (!isExpectedUserStateError(err)) {
+        console.warn('[RC] Nie udalo sie odswiezyc statusu konta', err);
+      }
     }
   }
 
@@ -364,7 +374,7 @@ function launchAuthFlow(url) {
     chrome.identity.launchWebAuthFlow({ url, interactive: true }, redirectUri => {
       if (chrome.runtime.lastError || !redirectUri) {
         const message = chrome.runtime.lastError?.message || 'Auth flow failed.';
-        reject(new Error(message));
+        reject(createErrorWithCode(message, isLoginCancelledMessage(message) ? LOGIN_CANCELLED_CODE : undefined));
         return;
       }
       resolve(redirectUri);
@@ -394,10 +404,14 @@ async function requestGoogleIdToken(proxySettings) {
 
   const responseUrl = await launchAuthFlow(authUrl.toString());
   if (!responseUrl) {
-    throw new Error('Logowanie anulowane.');
+    throw createErrorWithCode('Logowanie anulowane.', LOGIN_CANCELLED_CODE);
   }
   const urlObj = new URL(responseUrl);
   const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+  const authError = hashParams.get('error') || urlObj.searchParams.get('error');
+  if (authError) {
+    throw createErrorWithCode(authError, isLoginCancelledMessage(authError) ? LOGIN_CANCELLED_CODE : undefined);
+  }
   const hashToken = hashParams.get('id_token');
   if (hashToken) {
     return hashToken;
@@ -461,11 +475,50 @@ function createErrorWithCode(message, code) {
   return err;
 }
 
+function errorCodeFrom(err) {
+  return (err && err.code ? String(err.code) : '').toUpperCase();
+}
+
+function isLoginCancelledMessage(message) {
+  const normalized = (message || '').toString().trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes('logowanie anulowane')
+    || normalized.includes('user did not approve')
+    || normalized.includes('access_denied')
+    || normalized.includes('cancelled')
+    || normalized.includes('canceled')
+    || normalized.includes('cancel');
+}
+
+function isExpectedUserStateError(err) {
+  const code = errorCodeFrom(err);
+  if (code && EXPECTED_USER_STATE_CODES.has(code)) return true;
+
+  const message = (err && err.message ? err.message : err || '').toString().toLowerCase();
+  return isLoginCancelledMessage(message)
+    || message.includes('auth_required')
+    || message.includes('google_login_required')
+    || message.includes('wymagane logowanie')
+    || message.includes('zaloguj sie kontem google')
+    || message.includes('zaloguj się kontem google')
+    || message.includes('sesja wygasla')
+    || message.includes('sesja wygasła');
+}
+
+function logUnexpectedError(label, err) {
+  if (!isExpectedUserStateError(err)) {
+    console.error(label, err);
+  }
+}
+
 function sanitizeUserFacingError(message, fallback = FRIENDLY_RETRY_MESSAGE) {
   const text = (message || '').toString().trim();
   if (!text) return fallback;
 
   const normalized = text.toLowerCase();
+  if (isLoginCancelledMessage(text)) {
+    return 'Logowanie anulowane.';
+  }
   if (normalized.includes('failed to fetch') || normalized.includes('networkerror') || normalized.includes('load failed')) {
     return fallback;
   }
@@ -516,7 +569,6 @@ async function fetchSessionToken(settings, options = {}) {
   } else if (deviceToken) {
     body.deviceToken = deviceToken;
   } else {
-    console.warn('[RC] No auth method available. User must sign in with Google.');
     throw createAuthRequiredError();
   }
   const headers = {
@@ -576,7 +628,6 @@ async function ensureSessionToken(settings, options = {}) {
       throw err;
     }
 
-    console.warn('[RC] Stored device token rejected by proxy, clearing local auth state.');
     await clearStoredDeviceToken();
     await clearStoredSession();
 
@@ -711,7 +762,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await broadcastAuthStatusChanged('login');
         sendResponse({ ok: true, profile, quota: session.quota || getQuotaState() });
       } catch (err) {
-        console.error('[RC] Google login failed', err);
+        logUnexpectedError('[RC] Google login failed', err);
         sendResponse({ error: sanitizeUserFacingError(err && err.message, 'Blad logowania Google.') });
       }
       return;
@@ -724,7 +775,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           chrome.tabs.create({ url: checkoutUrl });
           sendResponse({ ok: true, checkoutUrl });
         } catch (err) {
-          console.error('[RC] OPEN_UPGRADE_PAGE error:', err);
+          logUnexpectedError('[RC] OPEN_UPGRADE_PAGE error:', err);
           sendResponse({
             error: sanitizeUserFacingError(err && err.message, FRIENDLY_UPGRADE_MESSAGE),
             code: err && err.code ? err.code : undefined
@@ -825,7 +876,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         sessionToken = await ensureSessionToken(proxySettings, { interactive: true });
       } catch (err) {
-        console.error('[RC] Nie udalo sie pobrac tokenu proxy', err);
+        logUnexpectedError('[RC] Nie udalo sie pobrac tokenu proxy', err);
         const message = sanitizeUserFacingError(err && err.message, FRIENDLY_RETRY_MESSAGE);
         sendResponse({ error: message, errorCode: err && err.code ? err.code : undefined });
         return;
@@ -996,7 +1047,6 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
           );
           if (resp.status === 401 && attempt === 0) {
             attempt++;
-            console.warn('[RC] JWT rejected by proxy, refreshing session.');
             const refreshedSession = await fetchSessionToken(proxySettings, { interactive: false });
             sessionToken = refreshedSession.token;
             continue;
