@@ -163,6 +163,9 @@
   function onChipClick(event){
     const button = event.currentTarget;
     const targetHash = button.getAttribute('data-rc-hash') || '';
+    const entry = state.chipRegistry.get(targetHash);
+    // Keep the chip stable while the panel opens so Google Maps reflows cannot eat the first click.
+    lockRestack(entry, 900);
     let hostCard = button.closest('[data-rc-hash]');
     if (hostCard === button){
       hostCard = button.parentElement ? button.parentElement.closest('[data-rc-hash]') : null;
@@ -209,6 +212,19 @@
     entry.restackLockedUntil = Math.max(entry.restackLockedUntil || 0, nowTs() + durationMs);
   }
 
+  function isInteractionLocked(entry, btn){
+    if (!btn) return false;
+    if ((entry?.restackLockedUntil || 0) > nowTs()) return true;
+    try {
+      if (btn.matches(':hover')) return true;
+    } catch (_){ }
+    try {
+      return document.activeElement === btn;
+    } catch (_){
+      return false;
+    }
+  }
+
   function bindInteractionGuards(entry){
     const btn = entry?.button;
     if (!entry || !btn || entry.interactionGuardsBound) return;
@@ -235,9 +251,8 @@
       const btn = entry.button;
       if (!btn) return;
       if (entry.restacking) return;
-      if ((entry.restackLockedUntil || 0) > nowTs()) return;
       // Avoid shuffling while user hovers/clicks to prevent flicker and lost clicks
-      if (btn.matches(':hover') || document.activeElement === btn) return;
+      if (isInteractionLocked(entry, btn)) return;
 
       const buttonInCard = card.contains(btn);
       const slot = entry.slot;
@@ -360,6 +375,10 @@
       entry.restackCount = 0;
       entry.lastRestackTs = 0;
       entry.restackTotal = 0;
+    }
+    if (isInteractionLocked(entry, entry.button)){
+      ensureGuard(entry, card);
+      return;
     }
     const slot = chips.placeChip(card, entry.button, entry);
     if (entry.anchorStrategy === 'fallback'){

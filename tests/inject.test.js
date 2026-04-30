@@ -224,6 +224,38 @@ describe('Injection Logic', () => {
     observer.disconnect();
   });
 
+  test('Chip does not reposition during scan while hovered', () => {
+    const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true, url: 'https://example.com/' });
+    const helpers = loadInjection(dom);
+    resetEnvironment(dom, helpers);
+    const card = buildCard(dom, 'Fantastyczna obsluga, wszystko przebieglo bardzo sprawnie!', true, { reviewId: 'rev-hover-scan-lock' });
+    runInject(dom, helpers);
+
+    const chip = card.querySelector('.rc-chip-btn');
+    const body = card.querySelector('.ODSEW-ShBeI-text');
+    const slot = card.querySelector('.rc-chip-slot');
+    expect(chip).toBeTruthy();
+    expect(body).toBeTruthy();
+    expect(slot).toBeTruthy();
+    expect(slot.previousElementSibling).toBe(body);
+
+    const originalMatches = chip.matches.bind(chip);
+    chip.matches = (selector) => {
+      if (selector === ':hover') return true;
+      return originalMatches(selector);
+    };
+
+    const header = dom.window.document.createElement('div');
+    header.className = 'author-block';
+    header.textContent = 'Jan Hover';
+    card.insertBefore(header, card.firstChild);
+
+    runInject(dom, helpers);
+
+    expect(slot.previousElementSibling).toBe(body);
+    expect(slot.contains(chip)).toBe(true);
+  });
+
   test('Chip respects likes strip', () => {
     const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
     const helpers = loadInjection(dom);
