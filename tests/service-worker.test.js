@@ -330,6 +330,55 @@ describe('Service Worker Logic', () => {
     }
   });
 
+  test('GET_AUTH_STATUS clears stale stored profile when device token is invalid', async () => {
+    await localArea.set({
+      rcAccountProfile: {
+        email: 'stale@example.com',
+        sub: 'stale-user',
+        plan: 'trial',
+        updatedAt: '2026-05-04T00:00:00.000Z'
+      },
+      rcDeviceToken: 'stale-device-token'
+    });
+
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/session') {
+        const body = JSON.parse(options.body || '{}');
+        expect(body.deviceToken).toBe('stale-device-token');
+        return {
+          ok: false,
+          text: async () => JSON.stringify({
+            error: 'Invalid device token'
+          })
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let status = null;
+    onMessageHandler({ type: 'GET_AUTH_STATUS' }, {}, (payload) => {
+      status = payload;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(status).toEqual({ profile: null, quota: null });
+
+    const stored = await localArea.get(['rcAccountProfile', 'rcDeviceToken']);
+    expect(stored.rcAccountProfile).toBeUndefined();
+    expect(stored.rcDeviceToken).toBeUndefined();
+  });
+
   test('fetchWithTimeout rejects with a controlled timeout message', async () => {
     global.fetch = async (_url, init = {}) => new Promise((_, reject) => {
       init.signal?.addEventListener('abort', () => {
@@ -538,7 +587,9 @@ describe('Service Worker Logic', () => {
     expect(prompt).toContain('Jesli uzywasz imienia recenzenta albo formy typu Panie Pawle / Pani Katarzyno, umiesc je wylacznie na samym poczatku odpowiedzi albo na poczatku pierwszego zdania.');
     expect(prompt).toContain('Wariant brief ma miec maksymalnie 2 zdania i maksymalnie 220 znakow.');
     expect(prompt).toContain('Zwroc tylko poprawny JSON bez markdown, backtickow, blokow kodu, komentarzy i bez zadnego tekstu przed albo po JSON.');
-    expect(response._prompt).toBe(prompt);
+    expect(response.soft).toBe('soft reply');
+    expect(response.brief).toBe('brief reply');
+    expect(response.proactive).toBe('proactive reply');
   });
 
   test('GENERATE_ALL builds the updated Polish prompt for a negative review', async () => {
@@ -996,7 +1047,6 @@ describe('Service Worker Logic', () => {
       soft: 'soft retry',
       brief: 'brief retry',
       proactive: 'proactive retry',
-      _prompt: expect.any(String),
       quota: null
     });
   });

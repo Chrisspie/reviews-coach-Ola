@@ -5,8 +5,6 @@ const MAGIC_LINK_ENDPOINT_PATH = '/api/auth/magic-link';
 const GENERATE_ENDPOINT_PATH = '/gemini/generate';
 const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
-const LOG_PROMPT_PREVIEW_LIMIT = 200;
-const LOG_PROMPT_ELLIPSIS = '...';
 const GENERATE_REQUEST_TIMEOUT_MS = 18 * 1000;
 const GENERATE_TIMEOUT_MESSAGE = 'Usluga generowania odpowiada zbyt wolno. Sprobuj ponownie.';
 const MAX_REVIEW_TEXT_CHARS = 1500;
@@ -42,13 +40,6 @@ const EXPECTED_USER_STATE_CODES = new Set([
 
 let staticConfigPromise = null;
 let quotaState = null;
-
-function truncateForLog(value, maxLen = LOG_PROMPT_PREVIEW_LIMIT) {
-  const str = (value || '').toString();
-  if (str.length <= maxLen) return str;
-  const sliceLen = Math.max(0, maxLen - LOG_PROMPT_ELLIPSIS.length);
-  return str.slice(0, sliceLen) + LOG_PROMPT_ELLIPSIS;
-}
 
 function truncateReviewText(value, maxLen = MAX_REVIEW_TEXT_CHARS) {
   const str = (value || '').toString().trim();
@@ -333,7 +324,14 @@ async function getAuthStatusPayload(options = {}) {
   }
 
   const deviceToken = refresh ? await getStoredDeviceToken() : '';
-  if (refresh && (!profile || !quota) && (cached?.token || deviceToken)) {
+  if (refresh && profile && !cached?.token && !deviceToken) {
+    await clearAccountProfile();
+    updateQuotaState(null);
+    profile = null;
+    quota = null;
+  }
+
+  if (refresh && (cached?.token || deviceToken)) {
     try {
       const proxySettings = await getProxySettings();
       await ensureSessionToken(proxySettings, { interactive: false });
@@ -345,7 +343,11 @@ async function getAuthStatusPayload(options = {}) {
         updateQuotaState(quota);
       }
     } catch (err) {
-      if (!isExpectedUserStateError(err)) {
+      if (isExpectedUserStateError(err)) {
+        await logoutAccount();
+        profile = null;
+        quota = null;
+      } else {
         console.warn('[RC] Nie udalo sie odswiezyc statusu konta', err);
       }
     }
@@ -886,12 +888,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const reviewText = truncateReviewText(payload.text == null ? '' : String(payload.text));
       const placeType = truncateContextField(payload.placeType, MAX_PLACE_TYPE_CHARS);
       const placeName = truncateContextField(payload.placeName, MAX_PLACE_NAME_CHARS);
-      console.log('[RC] Worker payload:', {
+      console.log('[RC] Worker payload meta:', {
         rating,
         textLength: reviewText.length,
-        sample: reviewText.slice(0, 140),
         placeType,
-        placeName
+        hasPlaceName: !!placeName
       });
       const ratingNumber = parseFloat(rating);
       let toneHint = 'neutralny i uprzejmy';
@@ -1005,8 +1006,7 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
       const promptPayload = `${systemPrompt}\n\n${contextInstructionBlock}\n\n${promptRefinementBlock}\n\n${placeContextBlock}\n\n${userPrompt}`;
       console.log('[RC] Proxy request meta:', {
         proxy: proxySettings.proxyBase,
-        promptLength: promptPayload.length,
-        promptPreview: truncateForLog(promptPayload)
+        promptLength: promptPayload.length
       });
       const url = buildProxyUrl(proxySettings.proxyBase, GENERATE_ENDPOINT_PATH);
       const body = {
@@ -1119,7 +1119,7 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
           const logRemaining = quotaRemainingValue(quotaFromResp);
           const logLimit = quotaLimitValue(quotaFromResp);
           sendLogEvent(proxySettings, sessionToken, 'info', 'generate_success', { rating, remaining: logRemaining, limit: logLimit, quotaType: quotaFromResp?.type });
-          sendResponse({ soft, brief, proactive, _prompt: promptPayload, quota: quotaFromResp });
+          sendResponse({ soft, brief, proactive, quota: quotaFromResp });
           return;
         }
       } catch (e) {

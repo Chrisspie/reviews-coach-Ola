@@ -460,6 +460,7 @@
         <button id="rc_upgrade" class="rc-primary rc-upgrade" style="display:none">Kup abonament</button>
         <button id="rc_close" class="rc-secondary">Zamknij</button>
         <span class="rc-note">Kopiuje do schowka i otwiera okno odpowiedzi.</span>
+        <span class="rc-note">Generowanie wysyla tresc opinii, ocene i kontekst miejsca do backendu Reviews Coach oraz Google Gemini wyłącznie w celu przygotowania odpowiedzi.</span>
       </div>
       <div id="rc_err" class="rc-error"></div>
     `;
@@ -585,7 +586,6 @@
       placeType: contextValues.placeType,
       placeName: contextValues.placeName
     };
-    console.log('[RC] payload wysylany do SW:', { ...payload });
 
     timeoutId = window.setTimeout(() => {
       if (!settle() || !panelEl.isConnected) return;
