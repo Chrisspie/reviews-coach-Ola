@@ -634,7 +634,7 @@ describe('Panel Logic', () => {
     expect(sentMessages.some(message => message?.type === 'OPEN_LOGIN_PAGE')).toBe(true);
   });
 
-  test('AUTH_STATUS_CHANGED restores panel actions and regenerates after login', async () => {
+  test('AUTH_STATUS_CHANGED restores panel actions without consuming quota after login', async () => {
     const sentMessages = [];
     const env = setupPanelEnv({
       sendMessage: (message, cb) => {
@@ -695,8 +695,8 @@ describe('Panel Logic', () => {
     expect(panelEl.dataset.rcAuthRequired).toBe('false');
     expect(window.document.querySelector('#rc_login').style.display).toBe('none');
     expect(window.document.querySelector('#rc_copy').style.display).toBe('inline-flex');
-    expect(window.document.querySelector('#rc_preview').textContent).toBe('Nowa delikatna');
-    expect(sentMessages.filter(message => message?.type === 'GENERATE_ALL')).toHaveLength(2);
+    expect(window.document.querySelector('#rc_preview').textContent).toBe('Zalogowano. Kliknij Regeneruj, aby wygenerowac odpowiedz.');
+    expect(sentMessages.filter(message => message?.type === 'GENERATE_ALL')).toHaveLength(1);
   });
 
   test('GenerateReplies shows timeout error when worker stays silent', async () => {

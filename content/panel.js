@@ -366,9 +366,7 @@
 
     if (loggedIn) {
       if (errorBox) errorBox.textContent = '';
-      if (wasAuthRequired && typeof panelEl._rcGenerateAfterLogin === 'function') {
-        panelEl._rcGenerateAfterLogin();
-      } else if (wasAuthRequired && preview) {
+      if (wasAuthRequired && preview) {
         preview.textContent = 'Zalogowano. Kliknij Regeneruj, aby wygenerowac odpowiedz.';
       }
     } else {
