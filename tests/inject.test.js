@@ -65,6 +65,43 @@ function buildCard(dom, text, includeReplyButton = true, attrs = {}){
   return card;
 }
 
+function buildSearchReviewDialog(dom, reviews){
+  const dialog = dom.window.document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  reviews.forEach((review, index) => {
+    const item = dom.window.document.createElement('div');
+    item.className = 'search-review-item';
+
+    const header = dom.window.document.createElement('div');
+    header.className = 'reviewer-header';
+    header.textContent = review.author || `Reviewer ${index + 1}`;
+    item.appendChild(header);
+
+    const rating = dom.window.document.createElement('span');
+    rating.setAttribute('aria-label', `${review.rating || 5} gwiazdek`);
+    rating.textContent = '★★★★★';
+    item.appendChild(rating);
+
+    const body = dom.window.document.createElement('div');
+    body.textContent = review.text;
+    item.appendChild(body);
+
+    const reply = dom.window.document.createElement(review.actionTag || 'div');
+    if (!review.actionTag || review.actionTag !== 'a') {
+      reply.setAttribute('role', 'button');
+    } else {
+      reply.setAttribute('href', '#');
+    }
+    if (review.ariaLabel) reply.setAttribute('aria-label', review.ariaLabel);
+    reply.textContent = 'Odpowiedz';
+    item.appendChild(reply);
+
+    dialog.appendChild(item);
+  });
+  dom.window.document.body.appendChild(dialog);
+  return dialog;
+}
+
 function resetEnvironment(dom, helpers){
   if (helpers && helpers.chipRegistry){ helpers.chipRegistry.clear(); }
   const existing = [...dom.window.document.querySelectorAll('.rc-chip-btn')];
@@ -448,5 +485,87 @@ describe('Injection Logic', () => {
     expect(replyBtn).toBeTruthy();
     expect(replyBtn.nextElementSibling).toBe(chip);
     expect(card.contains(chip)).toBe(true);
+  });
+
+  test('Chip appears in Google Search reviews dialog without article role', () => {
+    const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
+    const helpers = loadInjection(dom);
+    resetEnvironment(dom, helpers);
+    const dialog = buildSearchReviewDialog(dom, [
+      {
+        author: 'Dariusz Prokopowicz',
+        rating: 5,
+        text: 'Szybka i profesjonalna naprawa lustra, bardzo polecam usluge.'
+      }
+    ]);
+
+    runInject(dom, helpers);
+
+    const item = dialog.querySelector('.search-review-item');
+    const chip = item.querySelector('.rc-chip-btn');
+    expect(chip).toBeTruthy();
+    expect(dialog.querySelectorAll('.rc-chip-btn').length).toBe(1);
+  });
+
+  test('Search reviews dialog is not treated as a single review card', () => {
+    const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
+    const helpers = loadInjection(dom);
+    resetEnvironment(dom, helpers);
+    const dialog = buildSearchReviewDialog(dom, [
+      {
+        author: 'Dariusz Prokopowicz',
+        rating: 5,
+        text: 'Szybka i profesjonalna naprawa lustra, bardzo polecam usluge.'
+      },
+      {
+        author: 'Piotr',
+        rating: 3,
+        text: 'Kontakt byl poprawny, ale termin moglby byc krotszy.'
+      }
+    ]);
+
+    runInject(dom, helpers);
+
+    const items = [...dialog.querySelectorAll('.search-review-item')];
+    expect(items).toHaveLength(2);
+    expect(items[0].querySelector('.rc-chip-btn')).toBeTruthy();
+    expect(items[1].querySelector('.rc-chip-btn')).toBeTruthy();
+    expect(dialog.querySelector(':scope > .rc-chip-btn')).toBeNull();
+  });
+
+  test('Search reviews dialog accepts duplicated visible and aria reply label', () => {
+    const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
+    const helpers = loadInjection(dom);
+    resetEnvironment(dom, helpers);
+    const dialog = buildSearchReviewDialog(dom, [
+      {
+        author: 'Dariusz Prokopowicz',
+        rating: 5,
+        ariaLabel: 'Odpowiedz',
+        text: 'Szybka i profesjonalna naprawa lustra, bardzo polecam usluge.'
+      }
+    ]);
+
+    runInject(dom, helpers);
+
+    expect(dialog.querySelector('.search-review-item .rc-chip-btn')).toBeTruthy();
+  });
+
+  test('Search reviews dialog accepts link-style reply action', () => {
+    const dom = new JSDOM('<!DOCTYPE html><body></body>', { pretendToBeVisual: true });
+    const helpers = loadInjection(dom);
+    resetEnvironment(dom, helpers);
+    const dialog = buildSearchReviewDialog(dom, [
+      {
+        author: 'Dariusz Prokopowicz',
+        rating: 5,
+        actionTag: 'a',
+        text: 'Szybka i profesjonalna naprawa lustra, bardzo polecam usluge.'
+      }
+    ]);
+
+    runInject(dom, helpers);
+
+    expect(dialog.querySelector('.search-review-item .rc-chip-btn')).toBeTruthy();
   });
 });

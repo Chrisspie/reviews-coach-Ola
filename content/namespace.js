@@ -24,7 +24,7 @@
     businessContext: 'rcBusinessContext'
   };
   config.selectors = config.selectors || {
-    cards: '[role="article"], [data-review-id], div[aria-label*="review"], div.hxVHQb',
+    cards: '[role="article"], [data-review-id], [data-reviewid], div[aria-label*="review"], div.hxVHQb',
     textInputs: 'textarea, [contenteditable="true"], input[type="text"]'
   };
   config.reviewSelectors = config.reviewSelectors || [
@@ -71,4 +71,81 @@
     'data-rating-score',
     'data-initial-rating'
   ];
+
+  const pages = RC.pages = RC.pages || {};
+
+  function isGoogleHost(hostname){
+    return /(^|\.)google\.(com|pl)$/i.test(hostname || '');
+  }
+
+  pages.isSupportedPage = function isSupportedPage(locationLike = global.location){
+    try {
+      const url = new URL(String(locationLike?.href || ''), global.location?.href || 'https://www.google.com/');
+      const hostname = url.hostname.toLowerCase();
+      const pathname = url.pathname.toLowerCase();
+      const hash = decodeURIComponent(url.hash || '').toLowerCase();
+
+      if (isGoogleHost(hostname) && pathname.startsWith('/maps/')) return true;
+      if (hostname === 'business.google.com' && /\/(?:customers\/reviews|reviews)(?:\/|$)/.test(pathname + hash)) return true;
+      if (isGoogleHost(hostname) && pathname === '/search' && /\/customers\/reviews(?:\/|$)/.test(hash)) return true;
+    } catch (_){ }
+    return false;
+  };
+
+  const debug = RC.debug = RC.debug || {};
+
+  debug.isEnabled = function isEnabled(){
+    try {
+      if (global.localStorage?.getItem('rcDebug') === '1') return true;
+      const url = new URL(String(global.location?.href || ''));
+      return url.searchParams.get('rcdebug') === '1';
+    } catch (_){
+      return false;
+    }
+  };
+
+  function renderDebugOverlay(){
+    if (!debug.isEnabled()) return;
+    if (!document.body) return;
+    let el = document.getElementById('rc_debug_overlay');
+    if (!el){
+      el = document.createElement('pre');
+      el.id = 'rc_debug_overlay';
+      el.setAttribute('aria-live', 'polite');
+      el.style.cssText = [
+        'position:fixed',
+        'left:12px',
+        'bottom:12px',
+        'z-index:2147483647',
+        'max-width:min(640px,calc(100vw - 24px))',
+        'max-height:45vh',
+        'overflow:auto',
+        'padding:10px 12px',
+        'margin:0',
+        'border:1px solid #2563eb',
+        'border-radius:8px',
+        'background:#0f172a',
+        'color:#dbeafe',
+        'font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace',
+        'white-space:pre-wrap',
+        'box-shadow:0 16px 40px rgba(15,23,42,.35)',
+        'pointer-events:auto'
+      ].join(';');
+      document.body.appendChild(el);
+    }
+    const snapshot = debug.snapshot || {};
+    el.textContent = `Reviews Coach debug\n${JSON.stringify(snapshot, null, 2)}`;
+  }
+
+  debug.log = function log(stage, data = {}){
+    if (!debug.isEnabled()) return;
+    debug.snapshot = {
+      ...(debug.snapshot || {}),
+      stage,
+      updatedAt: new Date().toISOString(),
+      [stage]: data
+    };
+    try { console.info('[RC_DEBUG]', stage, data); } catch (_){ }
+    try { renderDebugOverlay(); } catch (_){ }
+  };
 })(window);

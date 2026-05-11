@@ -228,6 +228,13 @@
 
     const upgradeUrl = (quota.upgradeUrl || '').trim();
     const type = (quota.type || (quota.limit ? 'usage' : null))?.toLowerCase() || null;
+    const rawLimit = Number(quota.limit);
+
+    if (type === 'unlimited' || (Number.isFinite(rawLimit) && rawLimit < 0)) {
+      box.style.display = 'block';
+      box.textContent = 'Bez limitu.';
+      return;
+    }
 
     const showUpgradeCta = () => {
       if (!upgradeUrl) return;

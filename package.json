@@ -4,6 +4,9 @@
   "description": "",
   "main": "content/index.js",
   "scripts": {
+    "build:extension:dev": "node ../scripts/build-extension.js local",
+    "build:extension:local": "node ../scripts/build-extension.js local",
+    "build:extension:prod": "node ../scripts/build-extension.js prod",
     "test": "vitest run --globals"
   },
   "keywords": [],

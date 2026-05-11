@@ -129,10 +129,14 @@
   };
 
   dom.findReplyButton = function findReplyButton(root){
-    const buttons = dom.qsaDeep('button, [role="button"]', root);
+    const buttons = dom.qsaDeep('button, [role="button"], a[href], [role="link"]', root);
     return buttons.find(btn => {
       if (!btn || btn.classList?.contains('rc-chip-btn')) return false;
-      const text = (btn.textContent || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const text = [
+        btn.getAttribute?.('aria-label') || '',
+        btn.getAttribute?.('title') || '',
+        btn.textContent || ''
+      ].join(' ').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
       return /(odpowiedz|reply|respond)/.test(text);
     }) || null;
   };

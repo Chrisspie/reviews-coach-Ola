@@ -73,7 +73,7 @@ global.chrome = {
 global.fetch = async () => { throw new Error('fetch not mocked'); };
 
 const worker = require('../service_worker.js');
-const { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText } = worker;
+const { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText, normalizeQuota, quotaFromHeaders } = worker;
 
 describe('Service Worker Logic', () => {
   beforeEach(async () => {
@@ -95,6 +95,43 @@ describe('Service Worker Logic', () => {
     const truncated = truncateReviewText(longText);
     expect(truncated.length).toBeLessThanOrEqual(1503);
     expect(truncated.endsWith('...')).toBe(true);
+  });
+
+  test('normalizeQuota preserves unlimited usage licenses', () => {
+    expect(normalizeQuota({
+      type: 'unlimited',
+      limit: -1,
+      expiresAt: '2099-02-01T00:00:00.000Z'
+    }, 'https://example.com/upgrade')).toEqual({
+      type: 'unlimited',
+      limit: -1,
+      remaining: null,
+      limitSeconds: null,
+      remainingSeconds: null,
+      expiresAt: '2099-02-01T00:00:00.000Z',
+      upgradeUrl: 'https://example.com/upgrade',
+      lifetime: false
+    });
+  });
+
+  test('quotaFromHeaders preserves unlimited usage headers', () => {
+    const headers = new Map([
+      ['x-free-mode', 'unlimited'],
+      ['x-free-limit', '-1'],
+      ['x-free-expires-at', '2099-02-01T00:00:00.000Z']
+    ]);
+
+    expect(quotaFromHeaders({
+      headers: { get: key => headers.get(key.toLowerCase()) || null }
+    }, '')).toEqual({
+      type: 'unlimited',
+      limit: -1,
+      remaining: null,
+      limitSeconds: null,
+      remainingSeconds: null,
+      expiresAt: '2099-02-01T00:00:00.000Z',
+      upgradeUrl: ''
+    });
   });
 
   test('loadConfigFile reads proxy base and license key', async () => {
@@ -216,7 +253,10 @@ describe('Service Worker Logic', () => {
             profile: {
               email: 'owner@example.com',
               sub: 'user-1',
-              plan: 'pro'
+              plan: 'pro',
+              replyAssistantConsentAt: '2026-05-06T08:30:00.000Z',
+              replyAssistantConsentVersion: '2026-05-06',
+              replyAssistantConsentSource: 'extension-options'
             },
             quota: {
               type: 'usage',
@@ -232,7 +272,14 @@ describe('Service Worker Logic', () => {
     };
 
     let response = null;
-    const listenerResult = onMessageHandler({ type: 'START_GOOGLE_LOGIN' }, {}, (payload) => {
+    const listenerResult = onMessageHandler({
+      type: 'START_GOOGLE_LOGIN',
+      consent: {
+        authorized: true,
+        version: '2026-05-06',
+        source: 'extension-options'
+      }
+    }, {}, (payload) => {
       response = payload;
     });
 
@@ -241,13 +288,19 @@ describe('Service Worker Logic', () => {
 
     expect(sessionBodies).toHaveLength(1);
     expect(sessionBodies[0].idToken).toBe('test-id-token');
+    expect(sessionBodies[0].replyAssistantAuthorized).toBe(true);
+    expect(sessionBodies[0].replyAssistantConsentVersion).toBe('2026-05-06');
+    expect(sessionBodies[0].replyAssistantConsentSource).toBe('extension-options');
     expect(response).toMatchObject({
       ok: true,
       profile: {
         email: 'owner@example.com',
         sub: 'user-1',
         plan: 'pro',
-        licenseId: 'license-1'
+        licenseId: 'license-1',
+        replyAssistantConsentAt: '2026-05-06T08:30:00.000Z',
+        replyAssistantConsentVersion: '2026-05-06',
+        replyAssistantConsentSource: 'extension-options'
       },
       quota: {
         type: 'usage',
@@ -263,7 +316,12 @@ describe('Service Worker Logic', () => {
     });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(status).toMatchObject({
-      profile: { email: 'owner@example.com', plan: 'pro', licenseId: 'license-1' },
+      profile: {
+        email: 'owner@example.com',
+        plan: 'pro',
+        licenseId: 'license-1',
+        replyAssistantConsentAt: '2026-05-06T08:30:00.000Z'
+      },
       quota: { remaining: 42 }
     });
     expect(sentTabMessages).toHaveLength(2);
@@ -276,7 +334,10 @@ describe('Service Worker Logic', () => {
           email: 'owner@example.com',
           sub: 'user-1',
           plan: 'pro',
-          licenseId: 'license-1'
+          licenseId: 'license-1',
+          replyAssistantConsentAt: '2026-05-06T08:30:00.000Z',
+          replyAssistantConsentVersion: '2026-05-06',
+          replyAssistantConsentSource: 'extension-options'
         },
         quota: {
           type: 'usage',

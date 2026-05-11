@@ -246,6 +246,33 @@ describe('Panel Logic', () => {
     expect(sentMessages.some(message => message?.type === 'OPEN_OPTIONS_PAGE')).toBe(true);
   });
 
+  test('Panel shows unlimited quota without upgrade action', async () => {
+    const unlimitedQuota = { type: 'unlimited', limit: -1, remaining: null, upgradeUrl: 'https://example.com/upgrade' };
+    const env = setupPanelEnv({
+      sendMessage: (message, cb) => {
+        if (message?.type === 'GET_QUOTA_STATUS') {
+          if (typeof cb === 'function') cb({ quota: unlimitedQuota });
+          return;
+        }
+        if (typeof cb === 'function') {
+          cb({ soft: 'A', brief: 'B', proactive: 'C', quota: unlimitedQuota });
+        }
+      }
+    });
+    const { panelApi, window, reviews } = env;
+    const card = window.document.createElement('div');
+    card.dataset.rcHash = 'unlimited-quota';
+    window.document.body.appendChild(card);
+    reviews.extractText = () => 'Bardzo dobra obsluga';
+    reviews.extractRating = () => '5';
+
+    await panelApi.openForCard(card, null, { autoGenerate: false });
+    await env.flush(2);
+
+    expect(window.document.querySelector('#rc_quota').textContent).toBe('Bez limitu.');
+    expect(window.document.querySelector('#rc_upgrade').style.display).toBe('none');
+  });
+
   test('Panel includes detected place context in generate payload', async () => {
     const sentMessages = [];
     const env = setupPanelEnv({

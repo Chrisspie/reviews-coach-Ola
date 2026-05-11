@@ -15,12 +15,13 @@
     dt { font-weight: 600; margin-top: 12px; }
     dd { margin: 4px 0 0; word-break: break-word; }
     label { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; font-size: 13px; font-weight: 600; }
-    input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: 14px system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif; color: #0f172a; background: #fff; }
-    input:focus { outline: 2px solid #93c5fd; outline-offset: 2px; border-color: #2563eb; }
+    input[type="text"] { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; font: 14px system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif; color: #0f172a; background: #fff; }
+    input[type="text"]:focus { outline: 2px solid #93c5fd; outline-offset: 2px; border-color: #2563eb; }
     button { border: none; border-radius: 8px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; background: #0f172a; color: #fff; }
     button.secondary { background: #e2e8f0; color: #0f172a; }
     button.upgrade-action { display: none; background: #db2777; }
     button:disabled { cursor: not-allowed; opacity: .6; }
+    a { color: #1d4ed8; }
     .hint { margin-top: 24px; padding: 18px 20px; border-radius: 8px; border: 1px solid #dbe4f0; background: #f8fafc; font-size: 14px; }
     .muted { color: #64748b; font-size: 13px; }
     .status-ok { color: #047857; }
@@ -31,11 +32,16 @@
     .upgrade-status { min-height: 20px; margin: 10px 0 0; font-size: 13px; }
     .auth-only { display: none; }
     .guest-only { display: block; }
+    .consent-row { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; margin-top: 14px; }
+    .consent-row input { margin-top: 2px; }
+    .consent-row label { margin: 0; gap: 4px; font-size: 13px; font-weight: 600; }
+    .consent-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
     @media (max-width: 640px) {
       body { padding: 16px 12px 32px; }
       main { padding: 22px; }
       .form-grid { grid-template-columns: 1fr; }
       button { width: 100%; }
+      .consent-row { grid-template-columns: 20px minmax(0, 1fr); }
     }
   </style>
 </head>
@@ -44,11 +50,31 @@
   <h1 class="auth-only">Reviews Coach</h1>
   <p class="auth-only">Zaloguj sie kontem Google, ustaw kontekst miejsca i zarzadzaj dostepem.</p>
 
+  <section class="hint guest-only" id="consent-section">
+    <h2>Autoryzacja</h2>
+    <p class="muted">
+      Reviews Coach jest niezaleznym narzedziem third-party. Loguj sie tylko wtedy, gdy dzialasz jako wlasciciel
+      profilu Google Business Profile albo masz wyrazne upowaznienie do przygotowywania odpowiedzi w imieniu firmy.
+    </p>
+    <div class="consent-row">
+      <input id="reply_assistant_consent" type="checkbox">
+      <label for="reply_assistant_consent">
+        <span>Potwierdzam, ze dzialam jako wlasciciel profilu Google Business Profile albo mam wyrazne upowaznienie do przygotowywania odpowiedzi w imieniu firmy.</span>
+        <span class="muted">Wygenerowane odpowiedzi sa tylko robocza propozycja. Samodzielnie decyduje, co publikowac.</span>
+      </label>
+    </div>
+    <div class="consent-links">
+      <a href="https://reviewscoach.com/wspolpraca-z-zewnetrznym-dostawca" target="_blank" rel="noreferrer">Notice third-party</a>
+      <a href="https://reviewscoach.com/regulamin" target="_blank" rel="noreferrer">Regulamin</a>
+      <a href="https://reviewscoach.com/polityka-prywatnosci" target="_blank" rel="noreferrer">Polityka prywatnosci</a>
+    </div>
+  </section>
+
   <section class="hint">
     <h2 class="auth-only">Konto</h2>
-    <p id="auth-status" class="muted auth-only">(wczytywanie...)</p>
-    <p id="logged-out-help" class="muted guest-only">Zaloguj sie kontem Google, aby skonfigurowac dzialanie rozszerzenia.</p>
-    <p class="muted">Funkcja generowania wysyla tresc opinii, ocene i kontekst miejsca do backendu Reviews Coach oraz Google Gemini wyłącznie w celu przygotowania odpowiedzi.</p>
+    <p id="auth-status" class="muted">(wczytywanie...)</p>
+    <p id="logged-out-help" class="muted guest-only">Potwierdz autoryzacje i zaloguj sie kontem Google, aby skonfigurowac dzialanie rozszerzenia.</p>
+    <p class="muted">Funkcja generowania wysyla tresc opinii, ocene i kontekst miejsca do backendu Reviews Coach oraz Google Gemini wylacznie w celu przygotowania odpowiedzi.</p>
     <dl class="auth-only">
       <dt>Email</dt>
       <dd id="account-email">-</dd>
@@ -58,6 +84,8 @@
       <dd id="quota-left">-</dd>
       <dt>Nastepna platnosc</dt>
       <dd id="next-payment">-</dd>
+      <dt>Autoryzacja</dt>
+      <dd id="consent-status">-</dd>
     </dl>
     <div class="actions">
       <button id="google_login_btn">Zaloguj przez Google</button>
@@ -88,7 +116,8 @@
 
   <div class="hint auth-only">
     <p class="muted">Po zalogowaniu wroc do Google Maps i wygeneruj odpowiedz z panelu Reviews Coach.</p>
-    <p class="muted">Szczegoly przetwarzania danych znajdziesz w polityce prywatnosci dostepnej na stronie Reviews Coach.</p>
+    <p class="muted">Szczegoly przetwarzania danych znajdziesz w polityce prywatnosci oraz notice third-party dostepnych na stronie Reviews Coach.</p>
+    <p class="muted">Funkcja generowania wysyla tresc opinii, ocene i kontekst miejsca do backendu Reviews Coach oraz Google Gemini wylacznie w celu przygotowania odpowiedzi.</p>
   </div>
 </main>
 <script src="options.js"></script>

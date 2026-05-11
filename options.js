@@ -4,6 +4,7 @@
   const licenseTypeEl = document.getElementById('license-type');
   const quotaLeftEl = document.getElementById('quota-left');
   const nextPaymentEl = document.getElementById('next-payment');
+  const consentStatusEl = document.getElementById('consent-status');
   const googleLoginBtn = document.getElementById('google_login_btn');
   const upgradeBtn = document.getElementById('upgrade_btn');
   const logoutBtn = document.getElementById('logout_btn');
@@ -12,11 +13,17 @@
   const saveContextBtn = document.getElementById('save_context_btn');
   const contextSaveStatusEl = document.getElementById('context-save-status');
   const upgradeStatusEl = document.getElementById('upgrade-status');
+  const consentCheckbox = document.getElementById('reply_assistant_consent');
   const authOnlyEls = Array.from(document.querySelectorAll('.auth-only'));
   const guestOnlyEls = Array.from(document.querySelectorAll('.guest-only'));
   const BUSINESS_CONTEXT_KEY = 'rcBusinessContext';
   const MAX_PLACE_TYPE_CHARS = 80;
   const MAX_PLACE_NAME_CHARS = 120;
+  const REPLY_ASSISTANT_CONSENT_VERSION = '2026-05-06';
+  const REPLY_ASSISTANT_CONSENT_SOURCE = 'extension-options';
+
+  let loggedInState = false;
+  let authActionPending = false;
 
   function setText(el, text){
     if (el) el.textContent = text || '-';
@@ -68,6 +75,24 @@
     if (!upgradeStatusEl) return;
     upgradeStatusEl.textContent = text || '';
     upgradeStatusEl.className = `upgrade-status ${kind === 'error' ? 'status-err' : (kind === 'ok' ? 'status-ok' : 'muted')}`;
+  }
+
+  function isConsentAccepted() {
+    return Boolean(consentCheckbox?.checked);
+  }
+
+  function buildConsentPayload() {
+    if (!isConsentAccepted()) return null;
+    return {
+      authorized: true,
+      version: REPLY_ASSISTANT_CONSENT_VERSION,
+      source: REPLY_ASSISTANT_CONSENT_SOURCE
+    };
+  }
+
+  function syncLoginButtonState() {
+    if (!googleLoginBtn) return;
+    googleLoginBtn.disabled = authActionPending || (!loggedInState && !isConsentAccepted());
   }
 
   async function loadBusinessContext(){
@@ -140,6 +165,12 @@
     return 'mniej niz minute';
   }
 
+  function formatConsentStatus(profile){
+    const consentAt = formatDate(profile?.replyAssistantConsentAt);
+    if (consentAt) return `Potwierdzono ${consentAt}.`;
+    return 'Brak zapisanego potwierdzenia.';
+  }
+
   function planLabel(profile, quota){
     const plan = (profile?.plan || '').toString().toLowerCase();
     if (plan === 'pro') return 'Pro';
@@ -150,8 +181,16 @@
     return '-';
   }
 
+  function isUnlimitedQuota(quota){
+    if (!quota) return false;
+    const type = (quota.type || '').toString().toLowerCase();
+    const limit = Number(quota.limit);
+    return type === 'unlimited' || (Number.isFinite(limit) && limit < 0);
+  }
+
   function quotaLabel(quota){
     if (!quota) return 'Brak danych.';
+    if (isUnlimitedQuota(quota)) return 'Bez limitu.';
     if ((quota.type || '').toLowerCase() === 'time') {
       const remaining = Number(quota.remainingSeconds);
       const duration = formatDuration(remaining);
@@ -180,6 +219,7 @@
     const loggedIn = Boolean(profile && profile.email);
     const plan = (profile?.plan || '').toString().toLowerCase();
     const isTrial = loggedIn && plan === 'trial';
+    loggedInState = loggedIn;
     if (loggedIn) {
       authStatusEl.textContent = `Zalogowany jako ${profile.email}.`;
       authStatusEl.className = 'status-ok';
@@ -191,12 +231,14 @@
     setText(licenseTypeEl, loggedIn ? planLabel(profile, quota) : '-');
     setText(quotaLeftEl, loggedIn ? quotaLabel(quota) : '-');
     setText(nextPaymentEl, loggedIn ? nextPaymentLabel(profile, quota) : '-');
+    setText(consentStatusEl, loggedIn ? formatConsentStatus(profile) : '-');
     setAuthenticatedUiVisible(loggedIn);
-    if (logoutBtn) logoutBtn.disabled = !loggedIn;
+    if (logoutBtn) logoutBtn.disabled = authActionPending || !loggedIn;
     if (logoutBtn) logoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
     if (googleLoginBtn) googleLoginBtn.textContent = loggedIn ? 'Zmien konto Google' : 'Zaloguj przez Google';
     if (upgradeBtn) upgradeBtn.style.display = isTrial ? 'inline-flex' : 'none';
     if (!isTrial) setUpgradeStatus('', 'muted');
+    syncLoginButtonState();
     if (loggedIn) {
       loadBusinessContext();
     } else {
@@ -207,8 +249,9 @@
   }
 
   function setButtonsDisabled(disabled){
-    if (googleLoginBtn) googleLoginBtn.disabled = disabled;
-    if (logoutBtn) logoutBtn.disabled = disabled;
+    authActionPending = disabled;
+    syncLoginButtonState();
+    if (logoutBtn) logoutBtn.disabled = disabled || !loggedInState;
     if (upgradeBtn) upgradeBtn.disabled = disabled;
   }
 
@@ -225,10 +268,16 @@
 
   if (googleLoginBtn){
     googleLoginBtn.addEventListener('click', ()=>{
+      if (!loggedInState && !isConsentAccepted()) {
+        authStatusEl.textContent = 'Potwierdz autoryzacje przed polaczeniem konta Google.';
+        authStatusEl.className = 'status-err';
+        syncLoginButtonState();
+        return;
+      }
       setButtonsDisabled(true);
       authStatusEl.textContent = 'Otwieranie logowania Google...';
       authStatusEl.className = 'muted';
-      chrome.runtime.sendMessage({ type: 'START_GOOGLE_LOGIN' }, resp => {
+      chrome.runtime.sendMessage({ type: 'START_GOOGLE_LOGIN', consent: buildConsentPayload() }, resp => {
         setButtonsDisabled(false);
         if (chrome.runtime.lastError){
           authStatusEl.textContent = chrome.runtime.lastError.message;
@@ -292,7 +341,18 @@
     saveContextBtn.addEventListener('click', saveBusinessContext);
   }
 
+  if (consentCheckbox) {
+    consentCheckbox.addEventListener('change', () => {
+      syncLoginButtonState();
+      if (!loggedInState && isConsentAccepted()) {
+        authStatusEl.textContent = 'Mozesz polaczyc konto Google.';
+        authStatusEl.className = 'muted';
+      }
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    syncLoginButtonState();
     requestAuthStatus();
   });
 })();

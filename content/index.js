@@ -2,6 +2,61 @@
   const RC = global.RC;
   const { state, dom, scan } = RC;
 
+  function ensureRouteWatcher(){
+    if (state.handlers.routeChange) return;
+    const handler = ()=> setTimeout(()=> bootstrap(global), 80);
+    window.addEventListener('hashchange', handler);
+    window.addEventListener('popstate', handler);
+    state.handlers.routeChange = handler;
+  }
+
+  function teardown(){
+    if (state.mutationObserver){
+      try { state.mutationObserver.disconnect(); } catch (_){ }
+      state.mutationObserver = null;
+    }
+    if (state.handlers.scroll){
+      try { window.removeEventListener('scroll', state.handlers.scroll); } catch (_){ }
+      delete state.handlers.scroll;
+    }
+    if (state.handlers.resize){
+      try { window.removeEventListener('resize', state.handlers.resize); } catch (_){ }
+      delete state.handlers.resize;
+    }
+    if (state.handlers.visibility){
+      try { document.removeEventListener('visibilitychange', state.handlers.visibility); } catch (_){ }
+      delete state.handlers.visibility;
+    }
+    if (state.handlers.pointerDown){
+      try { document.removeEventListener('pointerdown', state.handlers.pointerDown); } catch (_){ }
+      delete state.handlers.pointerDown;
+    }
+    if (state.scanIntervalId){
+      try { clearInterval(state.scanIntervalId); } catch (_){ }
+      state.scanIntervalId = 0;
+    }
+    if (state.scanTimerId){
+      try { clearTimeout(state.scanTimerId); } catch (_){ }
+      state.scanTimerId = 0;
+    }
+    state.scanPending = false;
+    state.initialized = false;
+  }
+
+  ensureRouteWatcher();
+
+  const supportedPage = !(RC.pages && typeof RC.pages.isSupportedPage === 'function') || RC.pages.isSupportedPage();
+  RC.debug?.log?.('bootstrap', {
+    href: String(global.location?.href || ''),
+    supportedPage
+  });
+
+  if (!supportedPage){
+    teardown();
+    RC.debug?.log?.('teardown', { reason: 'unsupported-page' });
+    return;
+  }
+
   if (state.mutationObserver){
     try { state.mutationObserver.disconnect(); } catch (_){ }
   }

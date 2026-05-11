@@ -25,6 +25,8 @@ const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED';
 const AUTH_REQUIRED_MESSAGE = 'Wymagane logowanie. Otworz opcje rozszerzenia i zaloguj sie przez Google.';
 const GOOGLE_LOGIN_REQUIRED_CODE = 'GOOGLE_LOGIN_REQUIRED';
 const LOGIN_CANCELLED_CODE = 'LOGIN_CANCELLED';
+const CONSENT_REQUIRED_CODE = 'CONSENT_REQUIRED';
+const CONSENT_REQUIRED_MESSAGE = 'Potwierdz w opcjach rozszerzenia, ze jestes wlascicielem profilu albo masz wyrazne upowaznienie do przygotowywania odpowiedzi.';
 const AUTH_STATUS_CHANGED_MESSAGE = 'AUTH_STATUS_CHANGED';
 const FRIENDLY_RETRY_MESSAGE = 'Sprobuj ponownie pozniej.';
 const FRIENDLY_UPGRADE_MESSAGE = 'Nie udalo sie otworzyc platnosci. Sprobuj ponownie pozniej.';
@@ -34,6 +36,7 @@ const EXPECTED_USER_STATE_CODES = new Set([
   AUTH_REQUIRED_CODE,
   GOOGLE_LOGIN_REQUIRED_CODE,
   LOGIN_CANCELLED_CODE,
+  CONSENT_REQUIRED_CODE,
   'FREE_LIMIT_REACHED',
   'SUBSCRIPTION_REQUIRED'
 ]);
@@ -168,12 +171,26 @@ function normalizeQuota(raw, fallbackUrl = '') {
   if (!raw || typeof raw !== 'object') return null;
   const upgradeUrl = (raw.upgradeUrl || fallbackUrl || '').trim();
   const type = typeof raw.type === 'string' ? raw.type.toLowerCase() : null;
+  const expiresAt = raw.expiresAt ? new Date(raw.expiresAt).toISOString() : null;
+  const lifetime = raw.lifetime === true;
+  const unlimitedLimit = Number(raw.limit);
+  if (type === 'unlimited' || raw.unlimited === true || (Number.isFinite(unlimitedLimit) && unlimitedLimit < 0)) {
+    return {
+      type: 'unlimited',
+      limit: -1,
+      remaining: null,
+      limitSeconds: null,
+      remainingSeconds: null,
+      expiresAt,
+      upgradeUrl,
+      lifetime
+    };
+  }
   if (type === 'time') {
     const limitSeconds = Number(raw.limitSeconds ?? raw.limit);
     if (!Number.isFinite(limitSeconds) || limitSeconds <= 0) return null;
     const remainingSecondsRaw = Number(raw.remainingSeconds ?? raw.remaining);
     const remainingSeconds = Number.isFinite(remainingSecondsRaw) ? Math.max(0, Math.floor(remainingSecondsRaw)) : null;
-    const expiresAt = raw.expiresAt ? new Date(raw.expiresAt).toISOString() : null;
     return {
       type: 'time',
       limit: null,
@@ -188,7 +205,6 @@ function normalizeQuota(raw, fallbackUrl = '') {
   if (!Number.isFinite(limit) || limit <= 0) return null;
   const remainingNum = Number(raw.remaining ?? raw.remainingSeconds);
   const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
-  const expiresAt = raw.expiresAt ? new Date(raw.expiresAt).toISOString() : null;
   return {
     type: 'usage',
     limit: Math.max(0, Math.floor(limit)),
@@ -212,13 +228,26 @@ function quotaFromHeaders(resp, fallbackUrl = '') {
   if (!resp || typeof resp.headers?.get !== 'function') return null;
   const mode = (resp.headers.get('x-free-mode') || '').toLowerCase();
   const upgradeUrl = (resp.headers.get('x-free-upgrade-url') || fallbackUrl || '').trim();
+  const rawLimitHeader = resp.headers.get('x-free-limit');
+  const limitFromHeader = Number(rawLimitHeader);
+  const expiresAtHeader = resp.headers.get('x-free-expires-at');
+  const expiresAt = expiresAtHeader ? new Date(expiresAtHeader).toISOString() : null;
+  if (mode === 'unlimited' || (Number.isFinite(limitFromHeader) && limitFromHeader < 0)) {
+    return {
+      type: 'unlimited',
+      limit: -1,
+      remaining: null,
+      limitSeconds: null,
+      remainingSeconds: null,
+      expiresAt,
+      upgradeUrl
+    };
+  }
   if (mode === 'time') {
     const limitSecondsRaw = Number(resp.headers.get('x-free-limit-seconds') ?? resp.headers.get('x-free-limit'));
     if (!Number.isFinite(limitSecondsRaw) || limitSecondsRaw <= 0) return null;
     const remainingSecondsRaw = Number(resp.headers.get('x-free-remaining-seconds') ?? resp.headers.get('x-free-remaining'));
     const remainingSeconds = Number.isFinite(remainingSecondsRaw) ? Math.max(0, Math.floor(remainingSecondsRaw)) : null;
-    const expiresAtHeader = resp.headers.get('x-free-expires-at');
-    const expiresAt = expiresAtHeader ? new Date(expiresAtHeader).toISOString() : null;
     return {
       type: 'time',
       limit: null,
@@ -229,12 +258,10 @@ function quotaFromHeaders(resp, fallbackUrl = '') {
       upgradeUrl
     };
   }
-  const limit = Number(resp.headers.get('x-free-limit'));
+  const limit = Number(rawLimitHeader);
   if (!Number.isFinite(limit) || limit <= 0) return null;
   const remainingNum = Number(resp.headers.get('x-free-remaining'));
   const remaining = Number.isFinite(remainingNum) ? Math.max(0, Math.floor(remainingNum)) : null;
-  const expiresAtHeader = resp.headers.get('x-free-expires-at');
-  const expiresAt = expiresAtHeader ? new Date(expiresAtHeader).toISOString() : null;
   return {
     type: 'usage',
     limit: Math.max(0, Math.floor(limit)),
@@ -248,6 +275,7 @@ function quotaFromHeaders(resp, fallbackUrl = '') {
 
 function quotaLimitValue(quota) {
   if (!quota) return null;
+  if ((quota.type || '').toLowerCase() === 'unlimited') return null;
   if (typeof quota.limit === 'number') return quota.limit;
   if (typeof quota.limitSeconds === 'number') return quota.limitSeconds;
   return null;
@@ -255,6 +283,7 @@ function quotaLimitValue(quota) {
 
 function quotaRemainingValue(quota) {
   if (!quota) return null;
+  if ((quota.type || '').toLowerCase() === 'unlimited') return null;
   if (typeof quota.remaining === 'number') return quota.remaining;
   if (typeof quota.remainingSeconds === 'number') return quota.remainingSeconds;
   return null;
@@ -309,6 +338,9 @@ function buildStoredProfile(rawProfile, parsed) {
     name: (rawProfile.name || '').toString(),
     plan: (rawProfile.plan || parsed?.plan || '').toString(),
     licenseId: (rawProfile.licenseId || license.id || '').toString(),
+    replyAssistantConsentAt: rawProfile.replyAssistantConsentAt ? String(rawProfile.replyAssistantConsentAt) : '',
+    replyAssistantConsentVersion: rawProfile.replyAssistantConsentVersion ? String(rawProfile.replyAssistantConsentVersion) : '',
+    replyAssistantConsentSource: rawProfile.replyAssistantConsentSource ? String(rawProfile.replyAssistantConsentSource) : '',
     updatedAt: new Date().toISOString()
   };
 }
@@ -500,8 +532,10 @@ function isExpectedUserStateError(err) {
   return isLoginCancelledMessage(message)
     || message.includes('auth_required')
     || message.includes('google_login_required')
+    || message.includes('consent_required')
     || message.includes('wymagane logowanie')
     || message.includes('zaloguj sie kontem google')
+    || message.includes('potwierdz w opcjach rozszerzenia')
     || message.includes('zaloguj się kontem google')
     || message.includes('sesja wygasla')
     || message.includes('sesja wygasła');
@@ -532,6 +566,9 @@ function sanitizeUserFacingError(message, fallback = FRIENDLY_RETRY_MESSAGE) {
   }
   if (normalized.includes('google_login_required') || normalized.includes('zaloguj sie kontem google')) {
     return 'Aby kupic abonament, zaloguj sie kontem Google w rozszerzeniu.';
+  }
+  if (normalized.includes('consent_required') || normalized.includes('potwierdz w opcjach rozszerzenia')) {
+    return CONSENT_REQUIRED_MESSAGE;
   }
   return text;
 }
@@ -572,6 +609,11 @@ async function fetchSessionToken(settings, options = {}) {
     body.deviceToken = deviceToken;
   } else {
     throw createAuthRequiredError();
+  }
+  if (options.consent && typeof options.consent === 'object') {
+    body.replyAssistantAuthorized = options.consent.authorized === true;
+    body.replyAssistantConsentVersion = (options.consent.version || '').toString().trim();
+    body.replyAssistantConsentSource = (options.consent.source || '').toString().trim();
   }
   const headers = {
     'Content-Type': 'application/json',
@@ -643,7 +685,7 @@ async function ensureSessionToken(settings, options = {}) {
     }
 
     const idToken = await requestGoogleIdToken(settings);
-    session = await fetchSessionToken(settings, { idToken });
+    session = await fetchSessionToken(settings, { idToken, consent: options.consent });
   }
   return session.token;
 }
@@ -759,7 +801,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const idToken = await requestGoogleIdToken(proxySettings);
         await clearStoredDeviceToken();
         await clearStoredSession();
-        const session = await fetchSessionToken(proxySettings, { idToken });
+        const consent = msg && typeof msg === 'object' && msg.consent && typeof msg.consent === 'object'
+          ? msg.consent
+          : null;
+        const session = await fetchSessionToken(proxySettings, { idToken, consent });
         const profile = await getStoredAccountProfile();
         await broadcastAuthStatusChanged('login');
         sendResponse({ ok: true, profile, quota: session.quota || getQuotaState() });
@@ -1134,5 +1179,5 @@ Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
 });
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText };
+  module.exports = { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText, normalizeQuota, quotaFromHeaders };
 }
