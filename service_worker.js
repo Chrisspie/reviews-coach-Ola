@@ -6,7 +6,6 @@ const LOG_ENDPOINT_PATH = '/api/extension/log';
 const TOKEN_EXPIRY_GUARD_MS = 10 * 1000; // keep 10s safety window
 const GENERATE_REQUEST_TIMEOUT_MS = 18 * 1000;
 const GENERATE_TIMEOUT_MESSAGE = 'Usluga generowania odpowiada zbyt wolno. Sprobuj ponownie.';
-const MAX_REVIEW_TEXT_CHARS = 1500;
 const MAX_PLACE_TYPE_CHARS = 80;
 const MAX_PLACE_NAME_CHARS = 120;
 const INSTALL_ID_KEY = 'rcInstallId';
@@ -38,10 +37,8 @@ const EXPECTED_USER_STATE_CODES = new Set([
 let staticConfigPromise = null;
 let quotaState = null;
 
-function truncateReviewText(value, maxLen = MAX_REVIEW_TEXT_CHARS) {
-  const str = (value || '').toString().trim();
-  if (str.length <= maxLen) return str;
-  return str.slice(0, maxLen).trimEnd() + '...';
+function normalizeReviewText(value) {
+  return (value || '').toString().trim();
 }
 
 function truncateContextField(value, maxLen) {
@@ -925,7 +922,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const ratingRaw = payload.rating == null ? '?' : payload.rating;
       const rating = (typeof ratingRaw === 'string' ? ratingRaw : String(ratingRaw)).trim() || '?';
-      const reviewText = truncateReviewText(payload.text == null ? '' : String(payload.text));
+      const reviewText = normalizeReviewText(payload.text == null ? '' : String(payload.text));
       const placeType = truncateContextField(payload.placeType, MAX_PLACE_TYPE_CHARS);
       const placeName = truncateContextField(payload.placeName, MAX_PLACE_NAME_CHARS);
       console.log('[RC] Worker payload meta:', {
@@ -1068,5 +1065,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText, normalizeQuota, quotaFromHeaders };
+  module.exports = { normalizeBase, loadConfigFile, fetchWithTimeout, normalizeReviewText, normalizeQuota, quotaFromHeaders };
 }

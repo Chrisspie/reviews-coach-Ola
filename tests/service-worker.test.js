@@ -73,7 +73,7 @@ global.chrome = {
 global.fetch = async () => { throw new Error('fetch not mocked'); };
 
 const worker = require('../service_worker.js');
-const { normalizeBase, loadConfigFile, fetchWithTimeout, truncateReviewText, normalizeQuota, quotaFromHeaders } = worker;
+const { normalizeBase, loadConfigFile, fetchWithTimeout, normalizeReviewText, normalizeQuota, quotaFromHeaders } = worker;
 
 describe('Service Worker Logic', () => {
   beforeEach(async () => {
@@ -90,11 +90,11 @@ describe('Service Worker Logic', () => {
     expect(normalizeBase('https://api.test/path/')).toBe('https://api.test/path');
   });
 
-  test('truncateReviewText caps long reviews', () => {
-    const longText = 'a'.repeat(1700);
-    const truncated = truncateReviewText(longText);
-    expect(truncated.length).toBeLessThanOrEqual(1503);
-    expect(truncated.endsWith('...')).toBe(true);
+  test('normalizeReviewText preserves full long reviews', () => {
+    const longText = 'a'.repeat(5000);
+    const normalized = normalizeReviewText(`  ${longText}  `);
+    expect(normalized).toBe(longText);
+    expect(normalized.length).toBe(5000);
   });
 
   test('normalizeQuota preserves unlimited usage licenses', () => {
