@@ -1,4 +1,3 @@
-const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const SESSION_ENDPOINT_PATH = '/api/extension/session';
 const EXTENSION_UPGRADE_ENDPOINT_PATH = '/api/extension/account/upgrade';
 const MAGIC_LINK_ENDPOINT_PATH = '/api/auth/magic-link';
@@ -10,11 +9,6 @@ const GENERATE_TIMEOUT_MESSAGE = 'Usluga generowania odpowiada zbyt wolno. Sprob
 const MAX_REVIEW_TEXT_CHARS = 1500;
 const MAX_PLACE_TYPE_CHARS = 80;
 const MAX_PLACE_NAME_CHARS = 120;
-const DEFAULT_GENERATION_CONFIG = {
-  candidateCount: 1,
-  temperature: 0.5,
-  maxOutputTokens: 320
-};
 const INSTALL_ID_KEY = 'rcInstallId';
 const DEVICE_TOKEN_KEY = 'rcDeviceToken';
 const ACCOUNT_PROFILE_KEY = 'rcAccountProfile';
@@ -347,6 +341,7 @@ function buildStoredProfile(rawProfile, parsed) {
 
 async function getAuthStatusPayload(options = {}) {
   const refresh = options.refresh !== false;
+  const forceRefresh = options.forceRefresh === true;
   let profile = await getStoredAccountProfile();
   let quota = getQuotaState();
   const cached = await getCachedSession();
@@ -366,7 +361,7 @@ async function getAuthStatusPayload(options = {}) {
   if (refresh && (cached?.token || deviceToken)) {
     try {
       const proxySettings = await getProxySettings();
-      await ensureSessionToken(proxySettings, { interactive: false });
+      await ensureSessionToken(proxySettings, { interactive: false, forceRefresh });
       profile = await getStoredAccountProfile();
       quota = getQuotaState();
       const refreshed = await getCachedSession();
@@ -660,7 +655,7 @@ async function fetchSessionToken(settings, options = {}) {
 
 async function ensureSessionToken(settings, options = {}) {
   const cached = await getCachedSession();
-  if (isSessionValid(cached, settings.proxyBase)) {
+  if (!options.forceRefresh && isSessionValid(cached, settings.proxyBase)) {
     if (cached.quota) updateQuotaState(cached.quota);
     return cached.token;
   }
@@ -781,7 +776,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === 'GET_AUTH_STATUS') {
-      const status = await getAuthStatusPayload();
+      const status = await getAuthStatusPayload({ forceRefresh: msg.forceRefresh === true });
       sendResponse(status);
       return;
     }
@@ -939,125 +934,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         placeType,
         hasPlaceName: !!placeName
       });
-      const ratingNumber = parseFloat(rating);
-      let toneHint = 'neutralny i uprzejmy';
-      let sentimentGuideline = 'Brak oceny: zachowaj neutralność i zaproponuj pomoc, jeśli klient opisuje problem.';
-      if (!Number.isNaN(ratingNumber)) {
-        if (ratingNumber <= 2) {
-          toneHint = 'empatyczny, spokojny i profesjonalny';
-          sentimentGuideline = 'Klient jest niezadowolony: okaż zrozumienie, odnieś się do problemu i dobierz strategię odpowiedzi bez zakładania winy firmy.';
-        } else if (ratingNumber <= 3.5) {
-          toneHint = 'rzeczowy i uprzejmy';
-          sentimentGuideline = 'Klient ma mieszane odczucia: podziękuj, odnieś się do uwag i zapewnij o wsparciu.';
-        } else {
-          toneHint = 'serdeczny, wdzięczny i krótki';
-          sentimentGuideline = 'Klient jest zadowolony: podziękuj, podkreśl docenione elementy i zaproś do ponownej wizyty.';
-        }
-      }
-      const ratingInfo = (rating && rating !== '?') ? 'Ocena klienta: ' + rating + '/5.' : 'Ocena klienta: brak danych.';
-      const placeContextLines = [];
-      if (placeType) placeContextLines.push('- Typ dzialalnosci miejsca: ' + placeType + '.');
-      if (placeName) placeContextLines.push('- Nazwa firmy: "' + placeName + '". To nazwa wlasna firmy lub miejsca.');
-      const placeContextBlock = placeContextLines.length
-        ? 'Kontekst miejsca:\n' + placeContextLines.join('\n')
-        : 'Kontekst miejsca:\n- Brak dodatkowych danych o miejscu.';
-      const systemPrompt = `Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.
-
-Zadanie:
-Na podstawie opinii klienta wygeneruj 3 różne odpowiedzi w formacie JSON:
-{"soft":"...","brief":"...","proactive":"..."}
-
-Zasady ogólne:
-- Pisz naturalnie, uprzejmie i po ludzku, jak odpowiedź publikowana w imieniu firmy lub miejsca.
-- Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.
-- Każda odpowiedź musi być spersonalizowana i nawiązywać do konkretnego elementu opinii, najlepiej przez krótką parafrazę.
-- Adekwatnie reaguj na emocje autora opinii.
-- Nie pisz ogólników typu samo Dziękujemy za opinię, jeśli opinia zawiera konkretne treści.
-- Nie wymyślaj faktów, działań ani ustaleń, których nie ma w danych wejściowych.
-- Nie obiecuj rekompensaty, zwrotu pieniędzy, oddzwonienia ani konkretnych działań naprawczych, jeśli nie wynika to z danych.
-- Nie podawaj adresów e-mail, numerów telefonów ani innych danych kontaktowych.
-- Gdy trzeba zaprosić do dalszego kontaktu, użyj neutralnej formy, np.:
-  Zapraszamy do kontaktu przez dane dostępne na profilu firmy.
-- Nie używaj emoji.
-- Unikaj przesadnej formalności, urzędowego stylu i marketingowych ozdobników.
-- Jeśli płeć autora nie jest pewna, nigdy nie używaj żadnych form zastępczych typu Pani/Pan, Pan/Pani, Panią/Pana ani podobnych. W takiej sytuacji odpowiedź ma pozostać całkowicie neutralna i bezosobowa.
-
-Zwracanie się do autora:
-- Nie używaj samodzielnych form Pan/Pani.
-- Nie używaj także form łączonych ani alternatywnych typu:
-  Pani/Pan, Pan/Pani, Panią/Pana, Pana/Panią, Pani/Panu, Panu/Pani, Szanowny Kliencie ani żadnych podobnych konstrukcji zastępczych.
-- Jeśli imię recenzenta jednoznacznie wskazuje płeć i brzmi naturalnie, możesz użyć formy, np.:
-  Pani Katarzyno / Panie Piotrze.
-- Jeśli płeć nie jest pewna, imię jest nickiem, inicjałem albo brzmi nienaturalnie, nie używaj imienia ani żadnego zwrotu odnoszącego się bezpośrednio do osoby.
-- W takich przypadkach nie używaj też bezpośrednich form w stylu Ty, Tobie, Ci ani sformułowań wymagających określenia rodzaju.
-- Zamiast tego stosuj wyłącznie naturalne, neutralne konstrukcje bezosobowe, np.:
-  Dziękujemy za opinię,
-  Dziękujemy za wizytę,
-  Dziękujemy za podzielenie się uwagą,
-  Cieszymy się, że wizyta była udana,
-  Przykro nam, że wizyta nie spełniła oczekiwań,
-  Będzie nam miło gościć ponownie,
-  Zapraszamy ponownie.
-
-Znaczenie wariantów:
-- soft:
-  najbardziej serdeczny, empatyczny i spokojny wariant; ma budować dobrą atmosferę, okazać wdzięczność albo zrozumienie i brzmieć ciepło, ale nadal naturalnie; przy problemie jego głównym zadaniem jest deeskalacja i okazanie zrozumienia.
-- brief:
-  najkrótszy i najbardziej konkretny wariant; maksymalnie 2 zdania; bez lania wody i bez marketingowego stylu; przy problemie ma krótko i rzeczowo odnieść się do sedna uwagi bez wchodzenia w spór, bez bronienia firmy i bez przyznawania winy.
-- proactive:
-  najbardziej zaangażowany i uważny wariant; ma pokazywać gotowość do dalszej rozmowy, doprecyzowania albo sprawdzenia tematu; przy problemie może zaprosić do kontaktu przez profil firmy, ale neutralnie i bez sugerowania, że firma na pewno popełniła błąd; przy pozytywnej opinii ma pozostać naturalny i nie może być nachalny.
-
-Długość:
-- soft: 2-4 zdania
-- brief: maksymalnie 2 zdania
-- proactive: 2-4 zdania`;
-      const userPrompt = `Dopasowanie do oceny i wydźwięku opinii:
-${ratingInfo}
-${sentimentGuideline}
-Dostosuj ogólny ton: ${toneHint}
-
-Treść opinii:
-${reviewText}
-
-Wymagania dodatkowe:
-- Każdy wariant ma używać innego słownictwa i innych konstrukcji zdań.
-- Warianty nie mogą różnić się tylko pojedynczymi słowami ani samym tonem; mają różnić się także strategią odpowiedzi.
-- Jeśli opinia zawiera problem, każdy wariant ma odnieść się do problemu, ale innym ruchem komunikacyjnym:
-  soft ma przede wszystkim okazać zrozumienie i złagodzić napięcie,
-  brief ma przede wszystkim odpowiedzieć krótko i rzeczowo,
-  proactive ma przede wszystkim pokazać gotowość do dalszej rozmowy albo doprecyzowania.
-- Każdy wariant może zakończyć się neutralnym zaproszeniem do kontaktu w razie pytań, ale zaproszenie do kontaktu nie może być jedyną treścią odpowiedzi.
-- Jeśli opinia dotyczy ceny, wyceny, kosztu, warunków albo subiektywnej oceny typu za drogo, nie broń szczegółowej polityki firmy i nie wymyślaj jej; zachowaj neutralność.
-- O ostrożnym, ogólnym sposobie wyceny lub zakresie usługi wspominaj tylko wtedy, gdy jasno wynika z opinii albo z kontekstu miejsca, że chodzi o usługę wycenianą indywidualnie.
-- Jeśli opinia dotyczy jakości, obsługi, opóźnienia albo innego problemu w przebiegu usługi, uznaj uwagę i zachowaj empatię, ale nie stwierdzaj ani nie sugeruj, że wina na pewno leży po stronie firmy.
-- Jeśli opinia jest pozytywna, podkreśl to, co klient docenił, i naturalnie zaproś ponownie.
-- Jeśli opinia jest mieszana, odnotuj plusy i uwagi.
-- Jeśli opinia nie zawiera konkretów, nie dopowiadaj szczegółów.
-- Jeśli płeć autora nie jest pewna, odpowiedź musi pozostać neutralna i bezosobowa; nie używaj żadnych form typu Pan/Pani, Panią/Pana, Ty, Tobie, Ci ani żadnych sformułowań sugerujących płeć.
-
-Zwróć tylko poprawny JSON bez dodatkowych komentarzy.`;
-      const contextInstructionBlock = `Instrukcje dotyczace kontekstu miejsca:
-- Jesli znasz typ dzialalnosci miejsca, wykorzystaj go do lepszego dopasowania slownictwa i kontekstu odpowiedzi.
-- Jesli znasz nazwe firmy, traktuj ja wylacznie jako nazwe wlasna miejsca lub firmy. Uzywaj jej tylko wtedy, gdy brzmi to naturalnie i nie w kazdym wariancie.
-- Nie zakladaj menu, oferty, procesu obslugi ani zakresu uslug wylacznie na podstawie typu dzialalnosci lub nazwy firmy.`;
-      const promptRefinementBlock = `Priorytetowe doprecyzowania:
-- Traktuj odpowiedz jako przygotowywana w imieniu firmy lub miejsca. Nie zakladaj struktury firmy, roli autora odpowiedzi ani tego, ze chodzi o restauracje, chyba ze wynika to z kontekstu miejsca albo z samej opinii.
-- Jesli opinia jest krotka, ogolna albo malo konkretna, odpowiedz tez ma byc zwiezla i nie moze dopowiadac szczegolow branzy ani oferty.
-- Jesli opinia jest negatywna albo mieszana, trzy warianty maja roznic sie nie tylko stylem, ale tez glownym ruchem odpowiedzi: soft lagodzi napiecie, brief odpowiada rzeczowo, proactive najmocniej otwiera rozmowe.
-- Jesli uzywasz imienia recenzenta albo formy typu Panie Pawle / Pani Katarzyno, umiesc je wylacznie na samym poczatku odpowiedzi albo na poczatku pierwszego zdania. Nigdy w srodku ani na koncu odpowiedzi.
-- Jesli nie da sie uzyc imienia naturalnie na poczatku, nie uzywaj imienia wcale.
-- Wariant brief ma miec maksymalnie 2 zdania i maksymalnie 220 znakow.
-- Zwroc tylko poprawny JSON bez markdown, backtickow, blokow kodu, komentarzy i bez zadnego tekstu przed albo po JSON.`;
-      const promptPayload = `${systemPrompt}\n\n${contextInstructionBlock}\n\n${promptRefinementBlock}\n\n${placeContextBlock}\n\n${userPrompt}`;
       console.log('[RC] Proxy request meta:', {
         proxy: proxySettings.proxyBase,
-        promptLength: promptPayload.length
+        textLength: reviewText.length,
+        rating,
+        placeType,
+        hasPlaceName: !!placeName
       });
       const url = buildProxyUrl(proxySettings.proxyBase, GENERATE_ENDPOINT_PATH);
       const body = {
-        model: DEFAULT_MODEL,
-        contents: [{ role: 'user', parts: [{ text: promptPayload }] }],
-        generationConfig: DEFAULT_GENERATION_CONFIG
+        text: reviewText,
+        rating,
+        placeType,
+        placeName
       };
       const baseHeaders = {
         'Content-Type': 'application/json',

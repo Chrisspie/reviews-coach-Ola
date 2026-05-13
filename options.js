@@ -256,7 +256,7 @@
   }
 
   function requestAuthStatus(){
-    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATUS' }, resp => {
+    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATUS', forceRefresh: true }, resp => {
       if (chrome.runtime.lastError){
         authStatusEl.textContent = chrome.runtime.lastError.message;
         authStatusEl.className = 'status-err';

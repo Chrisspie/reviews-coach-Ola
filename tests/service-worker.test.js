@@ -440,6 +440,93 @@ describe('Service Worker Logic', () => {
     expect(stored.rcDeviceToken).toBeUndefined();
   });
 
+  test('GET_AUTH_STATUS forceRefresh fetches fresh profile and quota instead of cached session', async () => {
+    await localArea.set({
+      rcAccountProfile: {
+        email: 'owner@example.com',
+        sub: 'user-1',
+        plan: 'trial',
+        licenseId: 'trial-license',
+        updatedAt: '2026-05-04T00:00:00.000Z'
+      },
+      rcDeviceToken: 'device-token-1'
+    });
+    await sessionArea.set({
+      proxySession: {
+        token: 'cached-jwt',
+        proxyBase: 'https://proxy.local',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+        quota: { type: 'usage', limit: 20, remaining: 5 }
+      }
+    });
+
+    const sessionBodies = [];
+    global.fetch = async (url, options = {}) => {
+      if (url === 'config.json') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            proxyBase: 'https://proxy.local',
+            googleClientId: 'client-id.apps.googleusercontent.com'
+          })
+        };
+      }
+
+      if (url === 'https://proxy.local/api/extension/session') {
+        const body = JSON.parse(options.body || '{}');
+        sessionBodies.push(body);
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            token: 'fresh-jwt',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+            license: { id: 'pro-license' },
+            profile: {
+              email: 'owner@example.com',
+              sub: 'user-1',
+              plan: 'pro',
+              replyAssistantConsentAt: '2026-05-06T08:30:00.000Z',
+              replyAssistantConsentVersion: '2026-05-06',
+              replyAssistantConsentSource: 'extension-options'
+            },
+            quota: {
+              type: 'unlimited',
+              limit: -1,
+              remaining: null
+            }
+          })
+        };
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    let status = null;
+    onMessageHandler({ type: 'GET_AUTH_STATUS', forceRefresh: true }, {}, (payload) => {
+      status = payload;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(sessionBodies).toHaveLength(1);
+    expect(sessionBodies[0].deviceToken).toBe('device-token-1');
+    expect(status).toMatchObject({
+      profile: {
+        email: 'owner@example.com',
+        plan: 'pro',
+        licenseId: 'pro-license'
+      },
+      quota: {
+        type: 'unlimited',
+        limit: -1,
+        remaining: null
+      }
+    });
+
+    const refreshed = await sessionArea.get(['proxySession']);
+    expect(refreshed.proxySession.token).toBe('fresh-jwt');
+    expect(refreshed.proxySession.quota).toMatchObject({ type: 'unlimited', limit: -1 });
+  });
+
   test('fetchWithTimeout rejects with a controlled timeout message', async () => {
     global.fetch = async (_url, init = {}) => new Promise((_, reject) => {
       init.signal?.addEventListener('abort', () => {
@@ -549,16 +636,20 @@ describe('Service Worker Logic', () => {
       brief: 'brief reply',
       proactive: 'proactive reply'
     });
-    expect(generateBody.model).toBe('gemini-2.5-flash-lite');
-    expect(generateBody.generationConfig).toMatchObject({
-      candidateCount: 1,
-      maxOutputTokens: 320
+    expect(generateBody).toMatchObject({
+      text: 'Super obsluga',
+      rating: '5',
+      placeType: '',
+      placeName: ''
     });
+    expect(generateBody).not.toHaveProperty('model');
+    expect(generateBody).not.toHaveProperty('systemInstruction');
+    expect(generateBody).not.toHaveProperty('generationConfig');
     const stored = await localArea.get(['rcDeviceToken']);
     expect(stored.rcDeviceToken).toBe('fresh-device-token');
   });
 
-  test('GENERATE_ALL builds the updated Polish prompt for a positive review', async () => {
+  test('GENERATE_ALL sends positive review data without model or prompt internals', async () => {
     let generateBody = null;
     let response = null;
     let resolveGenerateRequest;
@@ -631,29 +722,15 @@ describe('Service Worker Logic', () => {
     await generateRequestSeen;
     await responseSeen;
 
-    const prompt = generateBody.contents[0].parts[0].text;
-
-    expect(prompt).toContain('Jesteś asystentem firmy, który tworzy odpowiedzi na opinie klientów w Google. Język odpowiedzi: polski.');
-    expect(prompt).toContain('Pisz naturalnie, uprzejmie i po ludzku, jak odpowiedź publikowana w imieniu firmy lub miejsca.');
-    expect(prompt).toContain('Używaj poprawnej polszczyzny i zawsze stosuj polskie znaki diakrytyczne (ą, ć, ę, ł, ń, ó, ś, ź, ż) w odpowiedziach.');
-    expect(prompt).toContain('Zwróć tylko poprawny JSON bez dodatkowych komentarzy.');
-    expect(prompt).toContain('Dziękujemy za opinię,');
-    expect(prompt).toContain('Ocena klienta: 5/5.');
-    expect(prompt).toContain('Klient jest zadowolony: podziękuj, podkreśl docenione elementy i zaproś do ponownej wizyty.');
-    expect(prompt).toContain('Dostosuj ogólny ton: serdeczny, wdzięczny i krótki');
-    expect(prompt).toContain('Treść opinii:\nŚwietna obsługa i pyszne pierogi.');
-    expect(prompt).not.toContain('Dzień dobry');
-    expect(prompt).not.toContain('Dzien dobry');
-    expect(prompt).toContain('Nie zakladaj struktury firmy, roli autora odpowiedzi ani tego, ze chodzi o restauracje, chyba ze wynika to z kontekstu miejsca albo z samej opinii.');
-    expect(prompt).toContain('Jesli uzywasz imienia recenzenta albo formy typu Panie Pawle / Pani Katarzyno, umiesc je wylacznie na samym poczatku odpowiedzi albo na poczatku pierwszego zdania.');
-    expect(prompt).toContain('Wariant brief ma miec maksymalnie 2 zdania i maksymalnie 220 znakow.');
-    expect(prompt).toContain('Zwroc tylko poprawny JSON bez markdown, backtickow, blokow kodu, komentarzy i bez zadnego tekstu przed albo po JSON.');
+    expect(generateBody).not.toHaveProperty('model');
+    expect(generateBody).not.toHaveProperty('contents');
+    expect(generateBody).not.toHaveProperty('systemInstruction');
     expect(response.soft).toBe('soft reply');
     expect(response.brief).toBe('brief reply');
     expect(response.proactive).toBe('proactive reply');
   });
 
-  test('GENERATE_ALL builds the updated Polish prompt for a negative review', async () => {
+  test('GENERATE_ALL sends negative review data without model or prompt internals', async () => {
     let generateBody = null;
     let resolveGenerateRequest;
     const generateRequestSeen = new Promise(resolve => { resolveGenerateRequest = resolve; });
@@ -719,22 +796,12 @@ describe('Service Worker Logic', () => {
     expect(listenerResult).toBe(true);
     await generateRequestSeen;
 
-    const prompt = generateBody.contents[0].parts[0].text;
-
-    expect(prompt).toContain('Ocena klienta: 1/5.');
-    expect(prompt).toContain('Klient jest niezadowolony: okaż zrozumienie, odnieś się do problemu i dobierz strategię odpowiedzi bez zakładania winy firmy.');
-    expect(prompt).toContain('Dostosuj ogólny ton: empatyczny, spokojny i profesjonalny');
-    expect(prompt).toContain('Warianty nie mogą różnić się tylko pojedynczymi słowami ani samym tonem; mają różnić się także strategią odpowiedzi.');
-    expect(prompt).toContain('soft ma przede wszystkim okazać zrozumienie i złagodzić napięcie,');
-    expect(prompt).toContain('brief ma przede wszystkim odpowiedzieć krótko i rzeczowo,');
-    expect(prompt).toContain('proactive ma przede wszystkim pokazać gotowość do dalszej rozmowy albo doprecyzowania.');
-    expect(prompt).toContain('Każdy wariant może zakończyć się neutralnym zaproszeniem do kontaktu w razie pytań, ale zaproszenie do kontaktu nie może być jedyną treścią odpowiedzi.');
-    expect(prompt).toContain('Jesli opinia jest negatywna albo mieszana, trzy warianty maja roznic sie nie tylko stylem, ale tez glownym ruchem odpowiedzi: soft lagodzi napiecie, brief odpowiada rzeczowo, proactive najmocniej otwiera rozmowe.');
-    expect(prompt).toContain('Jedzenie było zimne i długo czekaliśmy.');
-    expect(prompt).toContain('Zapraszamy do kontaktu przez dane dostępne na profilu firmy.');
+    expect(generateBody).not.toHaveProperty('model');
+    expect(generateBody).not.toHaveProperty('contents');
+    expect(generateBody).not.toHaveProperty('systemInstruction');
   });
 
-  test('GENERATE_ALL keeps rating and review text while adding place context to the prompt', async () => {
+  test('GENERATE_ALL sends rating, review text and place context only', async () => {
     let generateBody = null;
     let resolveGenerateRequest;
     const generateRequestSeen = new Promise(resolve => { resolveGenerateRequest = resolve; });
@@ -805,14 +872,9 @@ describe('Service Worker Logic', () => {
     expect(listenerResult).toBe(true);
     await generateRequestSeen;
 
-    const prompt = generateBody.contents[0].parts[0].text;
-
-    expect(prompt).toContain('Ocena klienta: 5/5.');
-    expect(prompt).toContain('Makaron byl swietny i obsluga bardzo mila.');
-    expect(prompt).toContain('Typ dzialalnosci miejsca: restauracja wloska.');
-    expect(prompt).toContain('Nazwa firmy: "Trattoria Verde". To nazwa wlasna firmy lub miejsca.');
-    expect(prompt).toContain('Instrukcje dotyczace kontekstu miejsca:');
-    expect(prompt).toContain('Priorytetowe doprecyzowania:');
+    expect(generateBody).not.toHaveProperty('model');
+    expect(generateBody).not.toHaveProperty('contents');
+    expect(generateBody).not.toHaveProperty('systemInstruction');
   });
 
   test('OPEN_UPGRADE_PAGE opens Stripe checkout directly for logged-in users', async () => {
